@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Stop background services that cost RAM or wake the CPU and serve no purpose
-# on a hack station. Set KEEP_BLUETOOTH=1 if the box uses a BT keyboard/mouse.
+# Stop anything that costs RAM, wakes the CPU or interrupts a session:
+# print/modem/bluetooth daemons, suspend, periodic apt runs, crash reporting,
+# and the tray apps Mint starts at login.
+# Set KEEP_BLUETOOTH=1 if the box uses a BT keyboard/mouse.
 set -euo pipefail
 
-UNITS=(cups cups-browsed ModemManager avahi-daemon)
+UNITS=(cups cups-browsed ModemManager avahi-daemon apport whoopsie)
 [ "${KEEP_BLUETOOTH:-0}" = 1 ] || UNITS+=(bluetooth)
 
 for u in "${UNITS[@]}"; do
@@ -14,10 +16,28 @@ for u in "${UNITS[@]}"; do
   fi
 done
 
+# Ubuntu's daily apt update/upgrade timers: CPU spikes and dpkg locks at
+# random times. 15-upgrade.sh is the only place upgrades happen.
+for t in apt-daily apt-daily-upgrade; do
+  sudo systemctl disable --now "$t.timer" 2>/dev/null || true
+done
+
+# No suspend or hibernate, ever.
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+
+# Crash reporter stays off even if the package is reinstalled.
+if [ -f /etc/default/apport ]; then
+  sudo sed -i 's/^enabled=.*/enabled=0/' /etc/default/apport
+fi
+
 # Tray apps that autostart via /etc/xdg/autostart. A user-level override
 # with Hidden=true wins over the system file.
+#   blueman      bluetooth tray
+#   mintupdate   update manager tray, nags about updates
+#   mintreport   system reports tray
+#   mintwelcome  welcome screen on login
 mkdir -p ~/.config/autostart
-for app in blueman; do
+for app in blueman mintupdate mintreport mintwelcome; do
   if [ -f "/etc/xdg/autostart/$app.desktop" ]; then
     printf '[Desktop Entry]\nHidden=true\n' > ~/.config/autostart/"$app.desktop"
   fi
