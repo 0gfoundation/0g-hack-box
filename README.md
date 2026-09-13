@@ -26,6 +26,7 @@ This clones the repo to `/opt/hack-box` and runs `setup/NN-*.sh` in order:
 | `20-services.sh` | disables cups, ModemManager, avahi, bluetooth (`KEEP_BLUETOOTH=1` to keep) |
 | `30-tools.sh` | chromium, Node 22, Claude Code, OpenCode |
 | `40-ssh.sh` | sshd, key-only, keys from `keys/*.pub` |
+| `50-desktop.sh` | dark theme, no screensaver, no lock, no display sleep |
 
 `setup/optional/` holds things we test separately, like zram.
 
