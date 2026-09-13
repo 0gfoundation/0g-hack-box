@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Entry point for a fresh Linux Mint box. Run as the normal user, not root:
-#   curl -fsSL https://raw.githubusercontent.com/wriches/0g-hack-box/main/bootstrap.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/0gfoundation/0g-hack-box/main/bootstrap.sh | bash
 # Clones (or updates) the repo to /opt/hack-box and runs setup/NN-*.sh in order.
 set -euo pipefail
 
-REPO=https://github.com/wriches/0g-hack-box.git
+REPO=https://github.com/0gfoundation/0g-hack-box.git
 DEST=/opt/hack-box
 
 if [ "$(id -u)" -eq 0 ]; then

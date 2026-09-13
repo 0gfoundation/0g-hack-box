@@ -15,7 +15,7 @@ Nothing in this repo is secret. Keys, tokens and funds never go here.
 Install Linux Mint Cinnamon 22 from the standard ISO (there is no minimal
 one), set the hostname to `hackboxN`, then as the normal user:
 
-    curl -fsSL https://raw.githubusercontent.com/wriches/0g-hack-box/main/bootstrap.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/0gfoundation/0g-hack-box/main/bootstrap.sh | bash
 
 This clones the repo to `/opt/hack-box` and runs `setup/NN-*.sh` in order:
 
