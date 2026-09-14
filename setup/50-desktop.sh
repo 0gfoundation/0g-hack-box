@@ -29,7 +29,3 @@ gs org.cinnamon.settings-daemon.plugins.power idle-dim-time 0
 
 # No notification popups over someone's editor.
 gs org.cinnamon.desktop.notifications display-notifications false
-
-# No input method framework. ibus is ~250 MB across four processes and only
-# needed for CJK and similar input. Takes effect at next login.
-im-config -n none >/dev/null 2>&1 || true

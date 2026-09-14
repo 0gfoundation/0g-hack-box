@@ -18,6 +18,9 @@ PATTERNS=(
   sticky
   transmission-gtk
   onboard
+  # Cinnamon spawns ibus-daemon unconditionally if present. Only needed for
+  # CJK and similar input. Cinnamon only Recommends it, so this is safe.
+  'ibus*'
 )
 
 installed=()
