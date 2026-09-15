@@ -22,7 +22,7 @@ This clones the repo to `/opt/hack-box` and runs `setup/NN-*.sh` in order:
 | script | does |
 |---|---|
 | `05-tailscale.sh` | joins the tailnet, prints a login URL on first run |
-| `10-debloat.sh` | purges LibreOffice, Thunderbird, media apps and the like |
+| `10-debloat.sh` | purges LibreOffice, Thunderbird, media apps, ibus and the like |
 | `15-upgrade.sh` | `apt full-upgrade`, non-interactive. The only place upgrades happen |
 | `20-services.sh` | disables cups, ModemManager, avahi, bluetooth (`KEEP_BLUETOOTH=1` to keep), apport, apt daily timers. Masks suspend. Hides the update, report, welcome and bluetooth tray apps |
 | `30-tools.sh` | chromium, Node 22, Claude Code, OpenCode |

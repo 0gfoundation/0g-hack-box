@@ -18,13 +18,16 @@ PATTERNS=(
   sticky
   transmission-gtk
   onboard
+  # Cinnamon spawns ibus-daemon unconditionally if present. Only needed for
+  # CJK and similar input. Cinnamon only Recommends it, so this is safe.
+  'ibus*'
 )
 
 installed=()
 for p in "${PATTERNS[@]}"; do
-  while read -r pkg; do
-    [ -n "$pkg" ] && installed+=("$pkg")
-  done < <(dpkg-query -W -f='${Package}\n' "$p" 2>/dev/null || true)
+  while read -r status pkg; do
+    [ "$status" = installed ] && installed+=("$pkg")
+  done < <(dpkg-query -W -f='${db:Status-Status} ${Package}\n' "$p" 2>/dev/null || true)
 done
 
 if [ ${#installed[@]} -gt 0 ]; then

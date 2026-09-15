@@ -30,8 +30,9 @@ if [ -f /etc/default/apport ]; then
   sudo sed -i 's/^enabled=.*/enabled=0/' /etc/default/apport
 fi
 
-# Tray apps that autostart via /etc/xdg/autostart. A user-level override
-# with Hidden=true wins over the system file.
+# Tray apps that autostart via /etc/xdg/autostart. A user-level copy with
+# Hidden=true wins over the system file. It has to be a full copy:
+# cinnamon-session rejects a stub with only Hidden=true and falls back.
 #   blueman      bluetooth tray
 #   mintupdate   update manager tray, nags about updates
 #   mintreport   system reports tray
@@ -39,6 +40,6 @@ fi
 mkdir -p ~/.config/autostart
 for app in blueman mintupdate mintreport mintwelcome; do
   if [ -f "/etc/xdg/autostart/$app.desktop" ]; then
-    printf '[Desktop Entry]\nHidden=true\n' > ~/.config/autostart/"$app.desktop"
+    { cat "/etc/xdg/autostart/$app.desktop"; echo "Hidden=true"; } > ~/.config/autostart/"$app.desktop"
   fi
 done
