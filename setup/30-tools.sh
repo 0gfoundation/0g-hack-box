@@ -3,7 +3,25 @@
 # via NodeSource, Claude Code and OpenCode via their native installers.
 set -euo pipefail
 
-sudo apt-get install -y -qq chromium htop sysstat build-essential
+sudo apt-get install -y -qq chromium htop sysstat build-essential scrot xdotool
+
+# Chromium must never block a session on a dialog. Mint's /usr/bin/chromium
+# honours $CHROMIUM_FLAGS, and /etc/environment reaches every login path.
+#   --password-store=basic   no keyring prompt (autologin leaves it locked)
+#   --no-first-run           no terms-of-service dialog
+if ! grep -q '^CHROMIUM_FLAGS=' /etc/environment; then
+  echo 'CHROMIUM_FLAGS="--password-store=basic --no-first-run --no-default-browser-check"' | sudo tee -a /etc/environment >/dev/null
+fi
+sudo mkdir -p /etc/chromium/policies/managed
+sudo tee /etc/chromium/policies/managed/hack-box.json >/dev/null <<'JSON'
+{
+  "BrowserSignin": 0,
+  "DefaultBrowserSettingEnabled": false,
+  "PasswordManagerEnabled": false,
+  "MetricsReportingEnabled": false,
+  "BackgroundModeEnabled": false
+}
+JSON
 
 if ! command -v node >/dev/null || [ "$(node -v | cut -d. -f1)" != v22 ]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -

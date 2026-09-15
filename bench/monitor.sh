@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Sample system load to CSV until killed.
-#   bench/monitor.sh results/n100-16gb/idle.csv [interval_seconds]
-# Columns: ts, load1, cpu_pct, mem_used_mb, mem_avail_mb, swap_used_mb, top_proc
+#   bench/monitor.sh <out.csv> [interval_seconds]
+# Columns: ts, load1, cpu_pct, mem_used_mb, mem_avail_mb, swap_used_mb,
+#          claude_mb, node_mb, chromium_mb   (summed RSS by process name)
 set -euo pipefail
 
 OUT=${1:?output csv}
@@ -9,8 +10,9 @@ INTERVAL=${2:-5}
 mkdir -p "$(dirname "$OUT")"
 
 read_cpu() { awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat; }
+rss_mb() { ps -eo rss,comm | awk -v n="$1" '$2==n{s+=$1} END{printf "%d", s/1024}'; }
 
-echo "ts,load1,cpu_pct,mem_used_mb,mem_avail_mb,swap_used_mb,top_proc" > "$OUT"
+echo "ts,load1,cpu_pct,mem_used_mb,mem_avail_mb,swap_used_mb,claude_mb,node_mb,chromium_mb" > "$OUT"
 read -r busy0 idle0 < <(read_cpu)
 while sleep "$INTERVAL"; do
   read -r busy1 idle1 < <(read_cpu)
@@ -21,7 +23,6 @@ while sleep "$INTERVAL"; do
   load1=$(cut -d' ' -f1 /proc/loadavg)
   read -r mem_used mem_avail < <(free -m | awk '/^Mem:/{print $3, $7}')
   swap_used=$(free -m | awk '/^Swap:/{print $3}')
-  top=$(ps -eo comm,%mem --sort=-%mem | awk 'NR==2{print $1}')
 
-  echo "$(date +%s),$load1,$cpu,$mem_used,$mem_avail,$swap_used,$top" >> "$OUT"
+  echo "$(date +%s),$load1,$cpu,$mem_used,$mem_avail,$swap_used,$(rss_mb claude),$(rss_mb node),$(rss_mb chromium)" >> "$OUT"
 done

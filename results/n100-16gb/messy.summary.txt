@@ -1,0 +1,11 @@
+samples 53  (265s)
+cpu%      avg  13.5   max    45
+load1     avg  0.55   max  0.97
+mem used  avg  3778   max  4407 MB
+mem avail min 11361 MB
+swap used max     0 MB
+claude_mb avg   378   max   541 MB
+node_mb   avg   219   max   541 MB
+chromium_mb avg  1987   max  2283 MB
+s1: turns 50  wall 181s  in 398  cache_w 29337  cache_r 1765531  out 16259  $0.32  errors: ['result-2.json']
+s2: turns 45  wall 209s  in 366  cache_w 35705  cache_r 1692079  out 19800  $0.34
