@@ -12,6 +12,9 @@ for k in "$HERE"/keys/*.pub; do
   grep -qF "$(cut -d' ' -f2 "$k")" ~/.ssh/authorized_keys || cat "$k" >> ~/.ssh/authorized_keys
 done
 
+echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/"$USER" >/dev/null
+sudo chmod 440 /etc/sudoers.d/"$USER"
+
 sudo tee /etc/ssh/sshd_config.d/hack-box.conf >/dev/null <<'CONF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no

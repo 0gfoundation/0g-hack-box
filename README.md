@@ -26,7 +26,7 @@ This clones the repo to `/opt/hack-box` and runs `setup/NN-*.sh` in order:
 | `15-upgrade.sh` | `apt full-upgrade`, non-interactive. The only place upgrades happen |
 | `20-services.sh` | disables cups, ModemManager, avahi, bluetooth (`KEEP_BLUETOOTH=1` to keep), apport, apt daily timers. Masks suspend. Hides the update, report, welcome and bluetooth tray apps |
 | `30-tools.sh` | chromium, Node 22, Claude Code, OpenCode |
-| `40-ssh.sh` | sshd, key-only, keys from `keys/*.pub` |
+| `40-ssh.sh` | sshd, key-only, keys from `keys/*.pub`, passwordless sudo for the admin user |
 | `50-desktop.sh` | dark theme. Screensaver, lock, display sleep and notification popups off |
 
 `setup/optional/` holds things we test separately, like zram.
