@@ -6,6 +6,9 @@
 set -euo pipefail
 
 LABEL=${1:?label}; N_CLAUDE=${2:-1}; N_DEV=${3:-0}; N_TABS=${4:-0}
+# HOLD=<seconds>: keep the load up at least this long by looping sessions.
+# TABS_FILE=<path>: one URL per line, replaces the default tab list.
+HOLD=${HOLD:-0}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN=~/bench/runs/$LABEL
 TEMPLATE=~/bench/template
@@ -29,7 +32,11 @@ if [ "$N_TABS" -gt 0 ]; then
   export DISPLAY=:0
   urls=()
   for i in $(seq 1 "$N_DEV"); do urls+=("http://localhost:$((5172 + i))/"); done
-  urls+=(https://docs.0g.ai/ https://github.com/0gfoundation https://code.claude.com/docs/en/overview https://vite.dev/guide/)
+  if [ -n "${TABS_FILE:-}" ]; then
+    while read -r u; do [ -n "$u" ] && urls+=("$u"); done < "$TABS_FILE"
+  else
+    urls+=(https://docs.0g.ai/ https://github.com/0gfoundation https://code.claude.com/docs/en/overview https://vite.dev/guide/)
+  fi
   pkill -x chromium 2>/dev/null || true; sleep 1
   for i in $(seq 1 "$N_TABS"); do
     url="${urls[$(( (i - 1) % ${#urls[@]} ))]}"
@@ -38,12 +45,17 @@ if [ "$N_TABS" -gt 0 ]; then
   done
 fi
 
-spids=()
-for i in $(seq 1 "$N_CLAUDE"); do
-  "$HERE/session.sh" "$RUN/s$i" & spids+=($!)
-  sleep 3
+t0=$(date +%s); round=0
+while :; do
+  round=$((round + 1)); spids=()
+  for i in $(seq 1 "$N_CLAUDE"); do
+    d="$RUN/s$i"; [ "$round" -gt 1 ] && d="$RUN/s${i}r$round"
+    "$HERE/session.sh" "$d" & spids+=($!)
+    sleep 3
+  done
+  wait "${spids[@]}"
+  [ $(( $(date +%s) - t0 )) -ge "$HOLD" ] && break
 done
-wait "${spids[@]}"
 sleep 15   # tail, catches post-session settle
 
 cleanup; trap - EXIT
