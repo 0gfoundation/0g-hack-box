@@ -18,12 +18,26 @@ turns, ~3 minutes, ~$0.25 at API rates.
 | typical | 1 / 1 / 3 | 3.85 GB | 11.9 GB | 44% | 0.96 | 273 MB | 1.7 GB | 0 |
 | messy | 2 / 2 / 6 | 4.41 GB | 11.4 GB | 45% | 0.97 | 541 MB | 2.3 GB | 0 |
 | abuse | 3 / 3 / 10 | 5.11 GB | 10.7 GB | 60% | 1.95 | 812 MB | 2.8 GB | 0 |
+| browser-heavy | 2 / 2 / 25, 17 min | 7.10 GB | 8.7 GB | 98% | 5.05 | 554 MB | 7.7 GB* | 0 |
 
-Reading: the browser is the biggest consumer, not Claude Code. Three
-concurrent sessions plus three dev servers plus ten tabs leaves 10.7 GB
-free and never touches swap. Load never reached 2 on 4 cores.
+`browser-heavy` used `bench/tabs-heavy.txt` (Remix, Uniswap, Etherscan,
+YouTube playing throughout, Twitch, GitHub PRs, Reddit, X, The Verge,
+claude.ai, ChatGPT, Figma, Notion, the 0G sites, docs) with `HOLD=900` so
+the two sessions looped five times each. Memory plateaued at ~5.8 GB from
+minute 2 (Chromium's Memory Saver discarding background tabs). Load 5 on 4
+cores during the tab-opening storm, then 1 to 3. All 10 sessions finished
+in 140 to 206 s, no slower than with no browser.
 
-Caveats: sessions are 3 minutes, not 30, so Claude Code's context (and RSS)
-stays small; expect 1 GB or more per process by the end of a real session.
-Tabs were docs, GitHub and the dev app, not video. 4K roughly doubles what
-every tab and the compositor cost versus 1080p.
+\* summed RSS across 40 processes double-counts shared pages; `mem used` is
+the honest figure.
+
+Reading: the browser is the biggest consumer, not Claude Code. Even the
+deliberately unfair browser-heavy run left 8.7 GB free and never swapped.
+The N100's limit is burst CPU, not RAM: the desktop will feel sluggish for
+the seconds a tab storm or a video decode pegs all four cores. 16 GB is the
+right spec, 8 GB would not have been (5.8 GB steady state on a 1.4 GB idle floor).
+
+Caveats: each session is 3 minutes, so Claude Code's context (and RSS)
+stays small; expect 1 GB or more per process by the end of a real 30 minute
+session. 4K roughly doubles what every tab and the compositor cost versus
+1080p.

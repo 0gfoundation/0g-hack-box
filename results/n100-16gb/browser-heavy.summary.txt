@@ -1,0 +1,19 @@
+samples 209  (1045s)
+cpu%      avg  32.8   max    98
+load1     avg  1.86   max  5.05
+mem used  avg  5690   max  7097 MB
+mem avail min  8671 MB
+swap used max     0 MB
+claude_mb avg   420   max   554 MB
+node_mb   avg   262   max   627 MB
+chromium_mb avg  6862   max  7705 MB
+s1: turns 38  wall 150s  in 310  cache_w 33384  cache_r 1301293  out 15955  $0.28
+s1r2: turns 38  wall 172s  in 302  cache_w 32078  cache_r 1220213  out 13718  $0.26
+s1r3: turns 37  wall 193s  in 302  cache_w 29334  cache_r 1192777  out 14714  $0.25
+s1r4: turns 36  wall 143s  in 294  cache_w 32990  cache_r 1225697  out 16117  $0.27
+s1r5: turns 45  wall 140s  in 366  cache_w 33157  cache_r 1480276  out 14667  $0.29
+s2: turns 50  wall 183s  in 406  cache_w 44386  cache_r 1832786  out 21370  $0.38
+s2r2: turns 44  wall 181s  in 350  cache_w 34521  cache_r 1455180  out 15200  $0.29
+s2r3: turns 36  wall 173s  in 294  cache_w 27521  cache_r 1114232  out 13918  $0.24
+s2r4: turns 46  wall 206s  in 374  cache_w 34721  cache_r 1560278  out 16981  $0.31
+s2r5: turns 37  wall 174s  in 302  cache_w 31381  cache_r 1195631  out 13819  $0.25
