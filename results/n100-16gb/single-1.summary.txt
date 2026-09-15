@@ -1,0 +1,7 @@
+samples 20  (100s)
+cpu%      avg   5.3   max    31
+load1     avg  0.20   max  0.46
+mem used  avg  2512   max  2869 MB
+mem avail min 12898 MB
+swap used max     0 MB
+s1: turns 20  wall 75s  err False  in 162  cache_w 15055  cache_r 478924  out 5949  $0.109

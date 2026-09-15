@@ -1,0 +1,10 @@
+samples 43  (215s)
+cpu%      avg   9.3   max    44
+load1     avg  0.54   max  0.96
+mem used  avg  3373   max  3847 MB
+mem avail min 11921 MB
+swap used max     0 MB
+claude_mb avg   202   max   273 MB
+node_mb   avg   126   max   405 MB
+chromium_mb avg  1499   max  1723 MB
+s1: turns 38  wall 171s  in 310  cache_w 20967  cache_r 1206633  out 12952  $0.23
