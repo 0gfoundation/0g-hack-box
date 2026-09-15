@@ -11,7 +11,7 @@ RUN=~/bench/runs/$LABEL
 TEMPLATE=~/bench/template
 rm -rf "$RUN" && mkdir -p "$RUN"
 pids=()
-cleanup() { kill "${pids[@]}" 2>/dev/null || true; pkill -f "vite --port 51" 2>/dev/null || true; }
+cleanup() { kill "${pids[@]}" 2>/dev/null || true; pkill -f "vite --port 51" 2>/dev/null || true; pkill -x chromium 2>/dev/null || true; }
 trap cleanup EXIT
 
 "$HERE/monitor.sh" "$RUN/monitor.csv" 5 & pids+=($!)
@@ -23,14 +23,18 @@ for i in $(seq 1 "$N_DEV"); do
 done
 [ "$N_DEV" -gt 0 ] && sleep 10
 
+# Tabs cycle through the dev servers and the sites people actually keep open.
+# --no-first-run skips the terms dialog that otherwise blocks everything.
 if [ "$N_TABS" -gt 0 ]; then
   export DISPLAY=:0
+  urls=()
+  for i in $(seq 1 "$N_DEV"); do urls+=("http://localhost:$((5172 + i))/"); done
+  urls+=(https://docs.0g.ai/ https://github.com/0gfoundation https://code.claude.com/docs/en/overview https://vite.dev/guide/)
+  pkill -x chromium 2>/dev/null || true; sleep 1
   for i in $(seq 1 "$N_TABS"); do
-    port=$((5172 + (i - 1) % (N_DEV > 0 ? N_DEV : 1) + 1))
-    url="http://localhost:$port/?tab=$i"
-    [ "$N_DEV" -eq 0 ] && url="https://docs.0g.ai/?tab=$i"
-    chromium "$url" >/dev/null 2>&1 &
-    sleep 2
+    url="${urls[$(( (i - 1) % ${#urls[@]} ))]}"
+    chromium --no-first-run --no-default-browser-check "$url" >/dev/null 2>&1 &
+    sleep 3
   done
 fi
 
