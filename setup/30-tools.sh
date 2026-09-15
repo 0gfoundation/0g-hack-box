@@ -3,7 +3,7 @@
 # via NodeSource, Claude Code and OpenCode via their native installers.
 set -euo pipefail
 
-sudo apt-get install -y -qq chromium htop sysstat build-essential scrot
+sudo apt-get install -y -qq chromium htop sysstat build-essential scrot xdotool
 
 # Chromium must never block a session on a dialog. Mint's /usr/bin/chromium
 # honours $CHROMIUM_FLAGS, and /etc/environment reaches every login path.
