@@ -24,7 +24,7 @@ done
 [ "$N_DEV" -gt 0 ] && sleep 10
 
 # Tabs cycle through the dev servers and the sites people actually keep open.
-# --no-first-run skips the terms dialog that otherwise blocks everything.
+# Dialog-suppressing flags come from CHROMIUM_FLAGS in /etc/environment.
 if [ "$N_TABS" -gt 0 ]; then
   export DISPLAY=:0
   urls=()
@@ -33,7 +33,7 @@ if [ "$N_TABS" -gt 0 ]; then
   pkill -x chromium 2>/dev/null || true; sleep 1
   for i in $(seq 1 "$N_TABS"); do
     url="${urls[$(( (i - 1) % ${#urls[@]} ))]}"
-    chromium --no-first-run --no-default-browser-check "$url" >/dev/null 2>&1 &
+    chromium "$url" >/dev/null 2>&1 &
     sleep 3
   done
 fi
