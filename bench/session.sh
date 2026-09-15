@@ -7,7 +7,9 @@ set -euo pipefail
 
 DIR=${1:?workdir}
 MAX_TURNS=${2:-30}
-mkdir -p "$DIR" && cd "$DIR"
+# The app lives in app/ and the records beside it: `npm create vite .` wipes
+# a non-empty directory, records included, if it is asked to overwrite.
+mkdir -p "$DIR/app" && cd "$DIR/app"
 
 export PATH="$HOME/.local/bin:$PATH"
 export DISABLE_AUTOUPDATER=1
@@ -30,7 +32,7 @@ for i in "${!PHASES[@]}"; do
     --max-turns "$MAX_TURNS" \
     --output-format json \
     --dangerously-skip-permissions \
-    > "result-$n.json" 2>> stderr.log || true
-  echo "$(( $(date +%s) - start ))" > "wall_seconds-$n"
+    > "../result-$n.json" 2>> ../stderr.log || true
+  echo "$(( $(date +%s) - start ))" > "../wall_seconds-$n"
 done
-echo "$(( $(date +%s) - start ))" > wall_seconds
+echo "$(( $(date +%s) - start ))" > ../wall_seconds
