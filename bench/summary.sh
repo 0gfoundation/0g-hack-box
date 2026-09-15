@@ -18,17 +18,22 @@ if rows:
     print(f"mem used  avg {sum(f('mem_used_mb'))/n:5.0f}   max {max(f('mem_used_mb')):5.0f} MB")
     print(f"mem avail min {min(f('mem_avail_mb')):5.0f} MB")
     print(f"swap used max {max(f('swap_used_mb')):5.0f} MB")
+    for k in ("claude_mb", "node_mb", "chromium_mb"):
+        if k in rows[0]:
+            print(f"{k:9s} avg {sum(f(k))/n:5.0f}   max {max(f(k)):5.0f} MB")
 
-for rf in sorted(glob.glob(os.path.join(run, "s*/result.json"))):
-    d = os.path.dirname(rf)
-    try:
-        j = json.load(open(rf))
-    except Exception as e:
-        print(f"{os.path.basename(d)}: no result ({e})"); continue
-    u = j.get("usage", {})
-    wall = open(os.path.join(d, "wall_seconds")).read().strip() if os.path.exists(os.path.join(d, "wall_seconds")) else "?"
-    print(f"{os.path.basename(d)}: turns {j.get('num_turns')}  wall {wall}s  err {j.get('is_error')}  "
-          f"in {u.get('input_tokens',0)}  cache_w {u.get('cache_creation_input_tokens',0)}  "
-          f"cache_r {u.get('cache_read_input_tokens',0)}  out {u.get('output_tokens',0)}  "
-          f"${j.get('total_cost_usd',0):.3f}")
+for d in sorted(glob.glob(os.path.join(run, "s[0-9]*"))):
+    tot = dict(turns=0, cache_r=0, cache_w=0, inp=0, out=0, cost=0.0); errs = []
+    for rf in sorted(glob.glob(os.path.join(d, "result*.json"))):
+        try: j = json.load(open(rf))
+        except Exception as e: errs.append(os.path.basename(rf)); continue
+        u = j.get("usage", {})
+        tot["turns"] += j.get("num_turns", 0); tot["cost"] += j.get("total_cost_usd", 0)
+        tot["inp"] += u.get("input_tokens", 0); tot["out"] += u.get("output_tokens", 0)
+        tot["cache_r"] += u.get("cache_read_input_tokens", 0); tot["cache_w"] += u.get("cache_creation_input_tokens", 0)
+        if j.get("is_error"): errs.append(os.path.basename(rf))
+    wp = os.path.join(d, "wall_seconds")
+    wall = open(wp).read().strip() if os.path.exists(wp) else "?"
+    print(f"{os.path.basename(d)}: turns {tot['turns']}  wall {wall}s  in {tot['inp']}  cache_w {tot['cache_w']}  "
+          f"cache_r {tot['cache_r']}  out {tot['out']}  ${tot['cost']:.2f}" + (f"  errors: {errs}" if errs else ""))
 PY
