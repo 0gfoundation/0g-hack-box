@@ -21,7 +21,7 @@ a dedicated server after the test; nothing in the boxes names the host except `H
 
 | Unit | Where | Does |
 |---|---|---|
-| `hub/` (Go, SQLite, one binary `hackbox-hub`) | jarvis, LaunchAgent `com.udhay.hackbox-hub`, port 8125 | session registry, archive store, download pages, GitHub push queue, dashboard |
+| `hub/` (Go, SQLite, one binary `hackbox-hub`) | jarvis, LaunchAgent `com.udhay.hackbox-hub`, port 8210 | session registry, archive store, download pages, GitHub push queue, dashboard |
 | `hackbox-hubagent` (Python 3 stdlib, root) | each box, `hackbox-hubagent.service` | the only thing on a box that talks to the hub; polls it, runs `extend`/`end` |
 | overlay changes | each box, attendee session | name field, "Ask for more time", QR on the time-up screen, Done |
 | `hackbox-extend-request.service`, `hackbox-done.service` | each box, root oneshots | the attendee's two new requests, allowed by polkit (start only), like the Start button |
