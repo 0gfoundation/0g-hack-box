@@ -111,3 +111,14 @@ After the reboot:
 Then the branch was synced to `/opt/hack-box` (rsync, without the local config), 
 `setup/70-session.sh` rerun, and `hackbox hub set http://<jarvis>:8210 <token>`: the box shows on
 the hub dashboard as online and idle, and the welcome screen shows the name field.
+
+## Fleet build (same day)
+
+hackbox1 was updated in place over ssh (no reinstall): hub agent, name and email on the welcome
+screen, time-up screen that waits for Done, 0G agent skills, a new admin passphrase, and
+re-tagged on the tailnet to `tag:hackbox` with a new pre-approved tagged key (same name and IP,
+now owned by tagged-devices). The boxes are all set to Pure UEFI in the firmware.
+
+The fleet stick (`make-usb-iso.sh --fleet`) was built from `.env` and checked: hub URL and
+enroll token but no box token, the tagged Tailscale key, only the password hash (it matches),
+no `.env` or `headless.conf`. The whole procedure is now `docs/FLEET.md`.

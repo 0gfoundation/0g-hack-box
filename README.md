@@ -47,6 +47,8 @@ session starts at the next boot.
 
 ## Running the event
 
+- `docs/FLEET.md`: one stick for every box, the session hub, the dashboard and the `.env`.
+  Start here for a new event.
 - `docs/INSTALL.md`: BIOS checklist, USB or manual install, bootstrap, replacing a box.
 - `docs/SECRETS.md`: one key per box, which keys, how to set, rotate and revoke them.
 - `docs/EVENT-RUNBOOK.md`: for the desk. Morning checklist, commands, troubleshooting.

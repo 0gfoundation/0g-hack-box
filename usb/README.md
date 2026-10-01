@@ -278,7 +278,8 @@ are never copied onto the stick. For `ssh hackbox2` without prompts, add to `~/.
         UserKnownHostsFile ~/.ssh/known_hosts_hackbox
         StrictHostKeyChecking accept-new
 
-What we learned on real hardware (docs/log/macbook-install.md): set the firmware boot mode
-to Pure UEFI (or pick a "UEFI:" entry in the F7 menu; "UEFI: USB, Partition 2" works), keep
+The full fleet procedure (one stick, the hub numbers the boxes) is `docs/FLEET.md`. What we
+learned on real hardware (docs/log/macbook-install.md): pick a "UEFI:" entry in the F7 menu
+("UEFI: USB, Partition 2" works), keep
 an iPhone on its Personal Hotspot screen for the whole install, and expect 1.5 to 2 GB of
 downloads and about 30 minutes of provisioning on a phone hotspot.
