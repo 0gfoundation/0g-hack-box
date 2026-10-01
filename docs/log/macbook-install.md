@@ -36,10 +36,10 @@ ISO left in `usb/out/` would have been copied in as well. On jarvis the config l
 
 ## Config (not committed)
 
-`usb/headless.conf`, mode 600: `HB_HOSTNAME='hackbox1'`, `ADMIN_USER='hackadmin'`, generated
-24 character admin password, Wi-Fi on the iPhone hotspot with `WIFI_COUNTRY='SG'`, the Mac's
-`~/.ssh/id_ed25519.pub` in `SSH_KEY_FILES`, no `TS_AUTHKEY` (so `LAN_SSH=auto` keeps tcp/22
-open on the LAN).
+`usb/headless.conf`, mode 600: `HB_HOSTNAME='hackbox1'`, `ADMIN_USER='hackadmin'`, a simple
+admin password for this test box (asked for by the owner; replace before the event), Wi-Fi on
+the iPhone hotspot with `WIFI_COUNTRY='SG'`, the Mac's `~/.ssh/id_ed25519.pub` in
+`SSH_KEY_FILES`, and (after the first attempt below) a Tailscale auth key.
 
 ## First boot attempt: plain Mint, nothing installed
 
