@@ -1,0 +1,21 @@
+# dependencies and build output
+node_modules/
+dist/
+build/
+out/
+.next/
+cache/
+artifacts/
+coverage/
+
+# secrets: throwaway keys and API keys live here, never commit them
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# downloads and scratch from the examples
+downloaded.bin
+*.log
+.DS_Store

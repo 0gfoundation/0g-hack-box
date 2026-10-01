@@ -1,0 +1,16 @@
+{
+  "name": "storage-upload",
+  "private": true,
+  "type": "module",
+  "description": "Upload and download a file with 0G Storage on the Galileo testnet",
+  "scripts": {
+    "check": "node check.mjs",
+    "upload": "node upload.mjs",
+    "download": "node download.mjs"
+  },
+  "dependencies": {
+    "@0gfoundation/0g-storage-ts-sdk": "^1.2.12",
+    "ethers": "6.13.1"
+  },
+  "engines": { "node": ">=22" }
+}

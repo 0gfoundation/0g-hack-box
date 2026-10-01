@@ -1,0 +1,11 @@
+{
+  "name": "compute-chat",
+  "private": true,
+  "type": "module",
+  "description": "Call an LLM through the 0G Compute Router (OpenAI-compatible), zero dependencies",
+  "scripts": {
+    "models": "node models.mjs",
+    "chat": "node chat.mjs"
+  },
+  "engines": { "node": ">=22" }
+}
