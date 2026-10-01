@@ -124,7 +124,37 @@ Below the cards, the last 200 sessions, newest first:
 | GitHub | `disabled`, `queued`, `pushed` (links to the private repo), `failed` (hover for the error; retried every 5 minutes) |
 | Files | **zip**: `/dash/sessions/{id}/download`, the same zip the attendee gets, also after the attendee link expired; `empty` or `-` otherwise |
 
-### 5. API test page
+### 5. Agent keys and the agent choice
+
+The "Agent keys" panel sits between the box cards and the history. One row for the default
+(all boxes), then one row per box (an override).
+
+1. Each row has a password field for the **Anthropic API key** and the **0G router key**, and
+   checkboxes for the offered agents (`claude`, `claude-0g`, `opencode`).
+2. The fields are write-only. They never show a value, only a placeholder: "set, updated
+   hh:mm", "not set", or on a box row "inherited from default".
+3. Type a key and/or change the agent ticks, then **Save**: `POST /dash/config` with the scope
+   and only what changed. Empty fields are left as they are. A key must be 8 to 512 printable
+   characters without spaces; at least one agent must stay ticked. Errors show as a toast.
+4. **Clear** next to a key, or **Clear** / **Use default** under the agents, asks for
+   confirmation and removes that value at that scope. On a box row the default applies again.
+5. Each box card shows a small badge: "keys up to date" (the box reported the version the hub
+   wants) or "keys pending, applies at next idle". No badge when nothing is set anywhere.
+
+What the box does with it:
+
+1. Every heartbeat reply carries `config_version`, the hash of that box's effective config.
+2. When it differs from what the box last applied and the box is **idle**, the agent fetches
+   `GET /api/v1/config`, writes each secret with `hackbox secret set <name>`, runs
+   `hackbox agents set <agents...>` when given, then `hackbox reset` so the welcome screen
+   shows the new choice. Never during a session; an active box picks it up after the reset.
+3. The next heartbeat reports `applied_config_version`; the badge turns to "keys up to date".
+4. A name the hub does not have is left alone on the box.
+
+Per-box keys with spending caps are the safer choice: an attendee can read the key on their
+box.
+
+### 6. API test page
 
 `/dash/api_test.html` (tailnet only) exercises every box and dashboard call against the hub
 with a bearer token field. Useful to fake a box before the real agent runs.

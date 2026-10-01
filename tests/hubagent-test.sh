@@ -39,6 +39,7 @@ case "\$1" in
   status) echo '{"state":"'"\$(cat $RUN/state)"'"}' ;;
   extend) e=\$(cat $RUN/session-end); echo \$(( e + \$2 * 60 )) > $RUN/session-end ;;
   end) echo ending > $RUN/state ;;
+  secret) cat > "$T/secret-\$3" ;;
 esac
 EOF
 chmod +x "$T/hackbox"
@@ -107,6 +108,24 @@ check "job queued while the hub is down" wait_for "[ -n \"\$(ls $T/state/jobs)\"
 HUB_PID=$!
 check "queued job delivered after the hub is back" wait_for "[ -z \"\$(ls $T/state/jobs)\" ]"
 check "late session registered with its name" wait_for "curl -fs $STATE | grep -q 'Grace Hopper'"
+
+# --- agent keys from the dashboard: applied only while idle ---
+CFG=http://127.0.0.1:$PORT/dash/config
+post() { curl -fs -X POST -H 'Content-Type: application/json' -d "$1" "$CFG" >/dev/null; }
+printf 'Linus\n\n' > "$T/home/attendee"
+echo $(( $(date +%s) + 1800 )) > "$RUN/session-end"; echo active > "$RUN/state"; sleep 1
+post '{"scope":"*","set":{"anthropic-api-key":"sk-ant-test-0123456789","agents":"claude-0g opencode"}}'
+sleep 3
+check "keys not applied during a session" bash -c "! grep -q '^secret set' $T/commands.log"
+echo idle > "$RUN/state"
+check "default key applied when idle" wait_for "grep -qx 'secret set anthropic-api-key' $T/commands.log"
+check "key value delivered on stdin" [ "$(cat "$T/secret-anthropic-api-key" 2>/dev/null)" = "sk-ant-test-0123456789" ]
+check "agents set from the dashboard" wait_for "grep -qx 'agents set claude-0g opencode' $T/commands.log"
+check "welcome screen reset after applying" wait_for "grep -qx 'reset' $T/commands.log"
+check "dashboard config never returns the key" bash -c "! curl -fs $CFG | grep -q sk-ant-test"
+post '{"scope":"hackbox9","set":{"0g-router-key":"0g-box-key-abcdefgh"}}'
+check "box override applied" wait_for "[ \"\$(cat $T/secret-0g-router-key 2>/dev/null)\" = 0g-box-key-abcdefgh ]"
+check "dashboard shows keys up to date" wait_for "curl -fs $STATE | python3 -c 'import json,sys; b=[x for x in json.load(sys.stdin)[\"boxes\"] if x[\"name\"]==\"hackbox9\"][0]; sys.exit(0 if b.get(\"config_version\") and b.get(\"config_version\")==b.get(\"applied_config_version\") else 1)'"
 
 echo; [ $fails = 0 ] && echo "ALL PASSED" || { echo "$fails FAILED"; echo "--- agent log"; tail -20 "$T/agent.log"; echo "--- hub log"; tail -20 "$T/hub.log"; }
 exit $fails

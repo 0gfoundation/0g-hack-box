@@ -101,6 +101,9 @@ components:
         status:
           type: object
           description: Output of `hackbox status --json`, stored as is.
+        applied_config_version:
+          type: string
+          description: Optional. The config version the box last applied ("" for none). Omitted leaves the stored value unchanged.
     Command:
       type: object
       required: [id, op, minutes]
@@ -122,6 +125,76 @@ components:
           properties:
             status: { type: string, enum: [none, pending, approved, declined] }
             minutes: { type: integer, description: 'Approved minutes, 0 otherwise' }
+        config_version:
+          type: string
+          description: The agent config version the hub wants on this box. Empty string when nothing is set. Always present.
+          example: 2cf3336e1cdd99c3
+    BoxConfig:
+      type: object
+      required: [version, secrets]
+      properties:
+        version:
+          type: string
+          description: 'First 16 hex chars of sha256 over the sorted "name=value" lines of the effective config; "" when nothing is set. Same value as heartbeat config_version.'
+          example: 2cf3336e1cdd99c3
+        secrets:
+          type: object
+          description: Only the names that are set. Always an object, maybe empty.
+          properties:
+            anthropic-api-key: { type: string }
+            0g-router-key: { type: string }
+          additionalProperties: false
+        agents:
+          type: array
+          description: Omitted when no agent choice is set; the box then keeps its own.
+          items: { type: string, enum: [claude, claude-0g, opencode] }
+    ConfigNameState:
+      type: object
+      properties:
+        set: { type: boolean, description: This scope has its own value. }
+        updated_at: { type: integer, format: int64, description: 'Of the row that applies (own, or the default when inherited); 0 when neither.' }
+        inherited: { type: boolean, description: 'Box scope only: no own value, the default has one.' }
+    DashConfigScope:
+      type: object
+      properties:
+        scope: { type: string, description: '"*" (default, all boxes) or a box name' }
+        names:
+          type: object
+          properties:
+            anthropic-api-key: { $ref: '#/components/schemas/ConfigNameState' }
+            0g-router-key: { $ref: '#/components/schemas/ConfigNameState' }
+            agents: { $ref: '#/components/schemas/ConfigNameState' }
+        agents: { type: array, items: { type: string }, description: This scope's own agent list, empty when not set. }
+        effective_agents: { type: array, items: { type: string }, description: What applies (own, else default). }
+        config_version: { type: string, description: 'Box scopes: the version the box should run. "" for the default scope.' }
+    DashConfig:
+      type: object
+      description: Never contains secret values.
+      properties:
+        known_agents: { type: array, items: { type: string }, example: [claude, claude-0g, opencode] }
+        scopes:
+          type: array
+          description: The default scope first, then one per configured box.
+          items: { $ref: '#/components/schemas/DashConfigScope' }
+    DashConfigUpdate:
+      type: object
+      required: [scope]
+      properties:
+        scope: { type: string, description: '"*" or a configured box name; anything else is 400' }
+        set:
+          type: object
+          description: |
+            Secrets: printable ASCII, no whitespace, 8 to 512 chars. agents: space separated
+            from claude, claude-0g, opencode, at least one, no duplicates. An empty string
+            means "leave as is".
+          properties:
+            anthropic-api-key: { type: string }
+            0g-router-key: { type: string }
+            agents: { type: string, example: claude opencode }
+        clear:
+          type: array
+          description: Names to remove at this scope. At box scope the default applies again.
+          items: { type: string, enum: [anthropic-api-key, 0g-router-key, agents] }
     CommandResult:
       type: object
       properties:
@@ -157,6 +230,9 @@ components:
         extended_minutes: { type: integer }
         code: { type: string }
         request: { $ref: '#/components/schemas/DashRequest' }
+        config_version: { type: string, description: The agent config version the hub wants on this box. }
+        applied_config_version: { type: string, description: The version the box last reported applying. }
+        config_up_to_date: { type: boolean, description: 'config_version == applied_config_version ("keys up to date", else "keys pending, applies at next idle")' }
         status: { type: object }
     DashSession:
       type: object
@@ -310,6 +386,22 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '413': { description: 'Larger than 250 MB.' }
+
+  /api/v1/config:
+    get:
+      tags: [box]
+      summary: The effective agent config for this box (keys and offered agents)
+      description: |
+        Per name, the box's own value, else the default ("*"). The box fetches this when the
+        heartbeat config_version differs from what it applied, and applies it only when idle.
+      security: [ { boxToken: [] } ]
+      responses:
+        '200':
+          description: Effective config, with secret values.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BoxConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /d/{token}:
     get:
@@ -484,6 +576,35 @@ paths:
             application/zip:
               schema: { type: string, format: binary }
         '404': { description: 'No archive for that session.' }
+
+  /dash/config:
+    get:
+      tags: [dashboard]
+      summary: Agent key status per scope (never values)
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashConfig' }
+    post:
+      tags: [dashboard]
+      summary: Set or clear agent keys and the agent choice for a scope
+      description: 'Same guards as the other dashboard POSTs: Content-Type application/json, Origin must match Host. Values are validated before anything is written; errors never quote a value.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DashConfigUpdate' }
+      responses:
+        '200':
+          description: Saved; the new status (same shape as GET).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashConfig' }
+        '400': { description: 'Unknown scope or name, invalid value, a name both set and cleared, or nothing to do.' }
+        '403': { description: Cross-origin request. }
+        '415': { description: Not JSON. }
 
   /dash/api_test.html:
     get:

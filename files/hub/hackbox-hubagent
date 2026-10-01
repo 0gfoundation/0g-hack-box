@@ -13,6 +13,10 @@ docs/superpowers/specs/2026-10-01-session-hub-design.md.
   the box, so a hub compromise can extend or end a session, nothing else.
 - After the reset archived ~/project it uploads the archive. Jobs are files in
   /var/lib/hackbox/hub/jobs and are retried with backoff, across reboots.
+- Agent keys and the offered agents are set on the hub dashboard. When the hub's
+  config_version differs from the one applied here and the box is idle (never
+  during a session), it fetches them, writes them with `hackbox secret set` and
+  `hackbox agents set`, and resets the welcome screen so it shows them.
 
 Without /etc/hackbox/hub.conf it does nothing. Python 3 standard library only.
 Paths are overridable by environment for the tests (HB_*).
@@ -43,6 +47,9 @@ JOB_BACKOFF_MAX = float(os.environ.get("HB_JOB_BACKOFF_MAX", "300"))
 HUB_BACKOFF_MAX = float(os.environ.get("HB_HUB_BACKOFF_MAX", "30"))
 JOBS = os.path.join(STATE_DIR, "jobs")
 CURRENT = os.path.join(STATE_DIR, "current.json")
+APPLIED = os.path.join(STATE_DIR, "config-applied")
+SECRET_NAMES = ("anthropic-api-key", "0g-router-key")
+AGENT_NAMES = ("claude", "claude-0g", "opencode")
 
 
 def log(msg):
@@ -178,6 +185,10 @@ class Agent:
         self.hub_fails = 0
         self.hub_pause = 0
         self.status = {"hub": "unconfigured", "last_ok": 0, "last_error": "", "jobs": 0}
+        try:
+            self.applied = open(APPLIED, encoding="utf-8").read().strip()
+        except OSError:
+            self.applied = ""
 
     # -- session lifecycle (local, never waits for the hub) --
 
@@ -271,6 +282,7 @@ class Agent:
             "session_id": live["session_id"] if live else None, "state": state,
             "seconds_left": left,
             "extend_request_at": int(req) if req and req.isdigit() and live else 0,
+            "applied_config_version": self.applied,
             "status": status})
         for cmd in reply.get("commands") or []:
             self.run_command(hub, cmd)
@@ -280,6 +292,39 @@ class Agent:
             rm_run("extend-request")
             put_run("extend-status", "%s %s" % (st, ext.get("minutes") or 0))
             log("extend request %s" % st)
+        want = reply.get("config_version")
+        if isinstance(want, str) and want != self.applied and state == "idle":
+            self.apply_config(hub)
+
+    def apply_config(self, hub):
+        """Keys and agents from the dashboard, between sessions only. A failed
+        step leaves the version unapplied, so the next heartbeat tries again."""
+        cfg = hub.call("GET", "/api/v1/config")
+        secrets = cfg.get("secrets") or {}
+        for name in SECRET_NAMES:
+            value = secrets.get(name)
+            if not isinstance(value, str) or not value:
+                continue
+            r = subprocess.run([HACKBOX, "secret", "set", name], input=value + "\n",
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                raise ValueError("secret set %s failed: %s" % (name, r.stderr.strip()[-200:]))
+        agents = [a for a in (cfg.get("agents") or []) if a in AGENT_NAMES]
+        if agents:
+            r = subprocess.run([HACKBOX, "agents", "set"] + agents, capture_output=True,
+                               text=True, timeout=60)
+            if r.returncode != 0:
+                raise ValueError("agents set failed: %s" % (r.stdout + r.stderr).strip()[-200:])
+        # The welcome screen only shows a new agent selection after a reset.
+        if (read_run("state") or "idle") == "idle":
+            subprocess.run([HACKBOX, "reset"], capture_output=True, text=True, timeout=120)
+        self.applied = cfg.get("version") or ""
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        with open(APPLIED, "w", encoding="utf-8") as f:
+            f.write(self.applied + "\n")
+        log("applied hub config %s (%s; agents %s)" % (
+            self.applied, ", ".join(n for n in SECRET_NAMES if secrets.get(n)) or "no keys",
+            " ".join(agents) or "unchanged"))
 
     def run_command(self, hub, cmd):
         op, cid = cmd.get("op"), cmd.get("id")

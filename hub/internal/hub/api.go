@@ -166,6 +166,9 @@ type heartbeatReq struct {
 	SecondsLeft     int64           `json:"seconds_left"`
 	ExtendRequestAt int64           `json:"extend_request_at"`
 	Status          json.RawMessage `json:"status"`
+	// AppliedConfigVersion is the config version the box last applied.
+	// Omitted means "unchanged".
+	AppliedConfigVersion *string `json:"applied_config_version"`
 }
 
 type commandOut struct {
@@ -182,6 +185,8 @@ type extendOut struct {
 type heartbeatResp struct {
 	Commands []commandOut `json:"commands"`
 	Extend   extendOut    `json:"extend"`
+	// ConfigVersion is the agent config the hub wants on this box; "" when none is set.
+	ConfigVersion string `json:"config_version"`
 }
 
 // commandTTL: a command the box has not picked up by then is dropped, so a
@@ -213,6 +218,13 @@ func (s *Server) apiHeartbeat(w http.ResponseWriter, r *http.Request, box string
 	if err != nil {
 		s.serverError(w, err)
 		return
+	}
+	if req.AppliedConfigVersion != nil {
+		if _, err := s.db.Exec(`UPDATE boxes SET applied_config_version = ? WHERE name = ?`,
+			cleanText(*req.AppliedConfigVersion, 64), box); err != nil {
+			s.serverError(w, err)
+			return
+		}
 	}
 	if sid != "" && req.ExtendRequestAt != 0 {
 		_, err := s.db.Exec(`INSERT INTO requests (session_id, box, asked_at, status) VALUES (?,?,?,'pending')
@@ -272,6 +284,12 @@ func (s *Server) apiHeartbeat(w http.ResponseWriter, r *http.Request, box string
 			return
 		}
 	}
+	eff, err := s.effectiveConfig(box)
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	resp.ConfigVersion = configVersion(eff)
 	writeJSON(w, http.StatusOK, resp)
 }
 

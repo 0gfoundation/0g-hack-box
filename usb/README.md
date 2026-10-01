@@ -254,3 +254,31 @@ or run the build in an `ubuntu:24.04` container with those packages. Then:
 
 The stock ISO comes from any Linux Mint mirror (sha256 in the mirror's `sha256sum.txt`).
 `watch-install.sh` follows the install over ssh from the same machine.
+
+### A fleet from one `.env` (what the MacBook build uses)
+
+All secrets for every box live in one file at the repo root, `.env` (git ignored; the
+committed template is `.env.example`): admin password, Wi-Fi, the Tailscale key, the hub URL
+and one hub token per box. Build one stick per box with `--host`:
+
+    cp .env.example .env && chmod 600 .env          # fill in
+    ssh-keygen -t ed25519 -N '' -f ~/.ssh/hackbox_ed25519   # once: a key scripts can use
+    usb/make-usb-iso.sh --headless --config .env --host hackbox2 --repo "$PWD" \
+        /path/to/linuxmint-22.3-cinnamon-64bit.iso ~/hackbox2.iso
+
+With `HUB_URL` and `HUB_TOKEN_<host>` the box joins the session hub by itself on its first
+boot (dashboard, download QR, agent keys from the dashboard). `.env` and `usb/headless.conf`
+are never copied onto the stick. For `ssh hackbox2` without prompts, add to `~/.ssh/config`:
+
+    Host hackbox1 hackbox2 hackbox3 hackbox4
+        HostName %h.<tailnet>.ts.net
+        User hackadmin
+        IdentityFile ~/.ssh/hackbox_ed25519
+        IdentitiesOnly yes
+        UserKnownHostsFile ~/.ssh/known_hosts_hackbox
+        StrictHostKeyChecking accept-new
+
+What we learned on real hardware (docs/log/macbook-install.md): set the firmware boot mode
+to Pure UEFI (or pick a "UEFI:" entry in the F7 menu; "UEFI: USB, Partition 2" works), keep
+an iPhone on its Personal Hotspot screen for the whole install, and expect 1.5 to 2 GB of
+downloads and about 30 minutes of provisioning on a phone hotspot.

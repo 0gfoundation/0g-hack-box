@@ -1,7 +1,7 @@
 #!/bin/bash
 # Remaster the Linux Mint 22.3 Cinnamon ISO into a zero-touch installer for the hackbox machines.
 #   make-usb-iso.sh [source.iso] [output.iso]
-#   make-usb-iso.sh --headless --config <headless.conf> [--repo <dir>] [--keys <authorized_keys>] [source.iso] [output.iso]
+#   make-usb-iso.sh --headless --config <headless.conf|.env> [--host <name>] [--repo <dir>] [--keys <authorized_keys>] [source.iso] [output.iso]
 #
 # Default mode (unchanged): adds /casper/initrd-hackbox.lz (stock initrd + preseed segment, see
 # ../build-initrd.sh) and GRUB entries (UEFI) at the top of the menu:
@@ -27,7 +27,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LAB="${HACKBOX_LAB:-$HOME/hackbox-lab}"
-HEADLESS=0 CONFIG="" REPO="" KEYS=""
+HEADLESS=0 CONFIG="" REPO="" KEYS="" HOST_OPT=""
 pos=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -35,6 +35,7 @@ while [ $# -gt 0 ]; do
     --config) CONFIG="${2:?}"; shift 2 ;;
     --repo) REPO="${2:?}"; shift 2 ;;
     --keys) KEYS="${2:?}"; shift 2 ;;
+    --host) HOST_OPT="${2:?}"; shift 2 ;;
     -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) pos+=("$1"); shift ;;
   esac
@@ -65,8 +66,13 @@ if [ $HEADLESS = 1 ]; then
   vars=$(bash -c 'set -a; . "$1"; set +a
     for v in HB_HOSTNAME ADMIN_USER ADMIN_FULLNAME ADMIN_PASSWORD ADMIN_PASSWORD_HASH WIFI_SSID WIFI_PASSWORD WIFI_USERNAME WIFI_HIDDEN WIFI_COUNTRY WIFI_KEY_MGMT WIFI_EAP_DOMAIN WIFI_ANON_IDENTITY WIFI_EAP_NO_CA_CHECK SSH_KEY_FILES TS_AUTHKEY TS_TAG REPORT_URL LAN_SSH BEEP REPO_DIR HB_EXTRA_CMDLINE; do
       printf "%s=%q\n" "$v" "${!v:-}"
-    done' bash "$CONFIG")
+    done
+    # Session hub: the URL and this box'\''s own token (HUB_TOKEN_<host>, - written as _).
+    h=${2:-${HB_HOSTNAME:-}}; t=HUB_TOKEN_${h//-/_}
+    printf "HUB_URL=%q\nHUB_TOKEN=%q\n" "${HUB_URL:-}" "${!t:-}"' bash "$CONFIG" "$HOST_OPT")
   eval "$vars"
+  # --host builds the stick for one box of a fleet from one config (.env).
+  [ -n "$HOST_OPT" ] && HB_HOSTNAME=$HOST_OPT
   REPO="${REPO:-$REPO_DIR}"
   [ -n "$REPO" ] && [ -f "$REPO/setup/03-wifi.sh" ] || { echo "--repo (or REPO_DIR) must point at the 0g-hack-box tree" >&2; exit 1; }
   ADMIN_USER="${ADMIN_USER:-hackadmin}"
@@ -90,8 +96,9 @@ if [ $HEADLESS = 1 ]; then
 
   # /hackbox on the stick: repo tree, headless scripts, settings
   H="$W/hackbox"; mkdir -p "$H/headless" "$H/repo"
-  # Leave out the git-ignored local files in usb/: a config there holds the plain passwords.
-  (cd "$REPO" && tar --exclude=./.git --exclude=./results --exclude=./usb/headless.conf \
+  # Leave out the git-ignored local files (.env, usb/headless.conf): they hold the plain
+  # passwords and tokens.
+  (cd "$REPO" && tar --exclude=./.git --exclude=./results --exclude=./.env --exclude=./usb/headless.conf \
     --exclude=./usb/out --exclude='*.iso' --exclude='*.iso.sha256' -cf - .) | (cd "$H/repo" && tar -xf -)
   cp "$HERE/headless/"* "$H/headless/"
   q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -126,6 +133,14 @@ if [ $HEADLESS = 1 ]; then
     rm -rf "$W/nmcheck" "$H/wifi.applied"
   fi
   [ -n "$TS_AUTHKEY" ] && printf '%s\n' "$TS_AUTHKEY" > "$H/ts-authkey"
+  # Session hub (hub/): the late step installs it, the first boot's 70-session.sh starts the
+  # agent, and the box appears on the dashboard. Agent keys come from the dashboard, not here.
+  if [ -n "$HUB_URL" ]; then
+    [[ $HUB_URL =~ ^https?://[A-Za-z0-9.:-]+(/.*)?$ ]] || { echo "bad HUB_URL" >&2; exit 1; }
+    [[ $HUB_TOKEN =~ ^[A-Za-z0-9._-]{16,}$ ]] ||
+      { echo "HUB_URL is set but there is no HUB_TOKEN_${HB_HOSTNAME//-/_} for this box" >&2; exit 1; }
+    printf "HUB_URL='%s'\nHUB_TOKEN='%s'\n" "$HUB_URL" "$HUB_TOKEN" > "$H/hub.conf"
+  fi
   # ssh keys: --keys file, else SSH_KEY_FILES, else the repo's keys/*.pub plus the lab copy of jarvis's key
   if [ -n "$KEYS" ]; then cp "$KEYS" "$H/authorized_keys"
   else
@@ -133,7 +148,7 @@ if [ $HEADLESS = 1 ]; then
     for k in ${SSH_KEY_FILES:-"$REPO"/keys/*.pub "$LAB/keys/jarvis.pub"}; do [ -f "$k" ] && cat "$k" >> "$H/authorized_keys"; done
   fi
   grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+) ' "$H/authorized_keys" || { echo "no ssh public key to authorise" >&2; exit 1; }
-  echo "headless: admin $ADMIN_USER, host ${HB_HOSTNAME:-hackbox-{mac4\}}, keys $(grep -c . "$H/authorized_keys"), wifi $([ -n "$WIFI_SSID" ] && echo "'$WIFI_SSID'${WIFI_USERNAME:+ (enterprise)}" || echo none), tailscale key $([ -n "$TS_AUTHKEY" ] && echo yes || echo no), report ${REPORT_URL:-none}"
+  echo "headless: admin $ADMIN_USER, host ${HB_HOSTNAME:-hackbox-{mac4\}}, keys $(grep -c . "$H/authorized_keys"), wifi $([ -n "$WIFI_SSID" ] && echo "'$WIFI_SSID'${WIFI_USERNAME:+ (enterprise)}" || echo none), tailscale key $([ -n "$TS_AUTHKEY" ] && echo yes || echo no), hub ${HUB_URL:-none}, report ${REPORT_URL:-none}"
   # Readable for the installer; the repo keeps its own exec bits (bin/hackbox, tests/run.sh, ...).
   chmod -R u+rwX,go+rX,go-w "$H"
   chmod 0755 "$H/headless/"*.sh "$H/headless/hackbox-firstboot"

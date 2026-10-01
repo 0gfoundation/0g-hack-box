@@ -121,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/commands/{id}/result", s.boxAuth(s.apiCommandResult))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/end", s.boxAuth(s.apiEnd))
 	mux.HandleFunc("PUT /api/v1/sessions/{id}/archive", s.boxAuth(s.apiArchive))
+	mux.HandleFunc("GET /api/v1/config", s.boxAuth(s.apiConfig))
 
 	// Public pages (the only paths the tunnel should carry).
 	mux.HandleFunc("GET /d/{token}", s.pageDownload)
@@ -140,6 +141,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dash/requests/{id}", s.dashGuard(s.dashDecide))
 	mux.HandleFunc("GET /dash/sessions/{id}/download", s.dashDownload)
 	mux.HandleFunc("GET /dash/api_test.html", s.dashAPITest)
+	mux.HandleFunc("GET /dash/config", s.dashConfigGet)
+	mux.HandleFunc("POST /dash/config", s.dashGuard(s.dashConfigSet))
 
 	return s.logRequests(tunnelGuard(mux))
 }

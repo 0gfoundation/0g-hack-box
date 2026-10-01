@@ -29,7 +29,7 @@ monitor.
 |---|---|
 | Binary | `/Users/jarvis/hackbox-hub/hackbox-hub` |
 | Config | `/Users/jarvis/hackbox-hub/config.json` (mode 600, holds box tokens and the GitHub token) |
-| Data | `/Users/jarvis/hackbox-hub/data/`: `hub.db` (SQLite) and `archives/<session id>.tar.gz` |
+| Data | `/Users/jarvis/hackbox-hub/data/`: `hub.db` (SQLite, mode 600, also holds the agent keys set from the dashboard) and `archives/<session id>.tar.gz` |
 | LaunchAgent | `~/Library/LaunchAgents/com.udhay.hackbox-hub.plist`, label `com.udhay.hackbox-hub` |
 | Logs | `~/Library/Logs/hackbox-hub.{out,err}.log` (everything goes to `err`) |
 | Port | 8210 |
@@ -138,6 +138,9 @@ ssh jarvis 'du -sh /Users/jarvis/hackbox-hub/data/archives'
 
 - Dashboard: `http://<jarvis tailnet address>:8210/`.
 - API test page: `http://<jarvis tailnet address>:8210/dash/api_test.html`.
+- Agent keys (Anthropic, 0G router) and the offered agents are set on the dashboard, not in
+  `config.json`. They live in the `config` table of `hub.db`; values are never shown on the
+  dashboard or written to the log. Treat a copy of `hub.db` as a secret.
 - Backup: copy `/Users/jarvis/hackbox-hub/data/` while the service is stopped, or use
   `sqlite3 hub.db ".backup hub-copy.db"` while it runs.
 - A GitHub push that failed is retried every 5 minutes. The error shows on hover in the

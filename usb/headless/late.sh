@@ -41,6 +41,12 @@ install -m 0600 "$S/headless.env" "$T/etc/hackbox/headless.env"
 sed -i '/^ADMIN_PASSWORD_HASH=/d' "$T/etc/hackbox/headless.env"
 [ -f "$S/wifi.conf" ] && install -m 0600 "$S/wifi.conf" "$T/etc/hackbox/wifi.conf"
 [ -f "$S/ts-authkey" ] && install -m 0600 "$S/ts-authkey" "$T/etc/hackbox/ts-authkey"
+# Session hub: what `hackbox hub set` writes; 70-session.sh starts the agent when it sees it.
+if [ -f "$S/hub.conf" ]; then
+  install -m 0600 "$S/hub.conf" "$T/etc/hackbox/hub.conf"
+  install -d -m 0755 "$T/etc/hackbox/conf.d"
+  printf 'HUB_ENABLED=1\nEND_GRACE_SECONDS=180\n' > "$T/etc/hackbox/conf.d/38-hub.conf"
+fi
 install -m 0644 "$S/authorized_keys" "$T/etc/hackbox/headless-authorized_keys"
 
 # Repo tree, owned by the admin (bootstrap's layout: /opt/hack-box).

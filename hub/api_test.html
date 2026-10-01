@@ -71,6 +71,17 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
   <button onclick="call('POST','/api/v1/commands/'+v('cid')+'/result',body('b_res'),true)">Post command result</button>
 </fieldset>
 
+<fieldset><legend>Agent keys</legend>
+  <button onclick="call('GET','/api/v1/config',undefined,true)">Box: GET /api/v1/config</button>
+  <button onclick="call('GET','/dash/config')">Dash: GET /dash/config</button>
+  <label>POST /dash/config body (scope "*" or a box name; set and/or clear)</label>
+  <textarea id="b_cfg"></textarea>
+  <button onclick="call('POST','/dash/config',body('b_cfg'))">Dash: POST /dash/config</button>
+  <button onclick="$('b_cfg').value=JSON.stringify({scope:'hackbox1',clear:['anthropic-api-key','agents']},null,1)">Example: clear box override</button>
+  <label>Report applied config version in the next heartbeat (empty: do not send the field)</label>
+  <input id="applied" placeholder="e.g. 2cf3336e1cdd99c3">
+</fieldset>
+
 <fieldset><legend>Dashboard</legend>
   <button onclick="call('GET','/dash/state')">GET /dash/state</button>
   <div class="cols">
@@ -108,6 +119,7 @@ const now = () => Math.floor(Date.now() / 1000);
 $("base").value = location.protocol.startsWith("http") ? location.origin : "http://localhost:8210";
 $("b_create").value = JSON.stringify({name: "Ada Lovelace", agent: "claude", minutes: 30, started_at: now(), local_code: ""}, null, 1);
 $("b_end").value = JSON.stringify({ended_at: now(), reason: "timeout", empty: false}, null, 1);
+$("b_cfg").value = JSON.stringify({scope: "*", set: {"anthropic-api-key": "sk-ant-test-12345678", "0g-router-key": "", agents: "claude opencode"}, clear: []}, null, 1);
 $("b_hb").value = JSON.stringify({session_id: "", state: "active", seconds_left: 1500, extend_request_at: 0, status: {state: "active"}}, null, 1);
 
 function body(id) { try { return JSON.parse($(id).value); } catch (e) { show(0, "bad JSON in " + id + ": " + e.message); throw e; } }
@@ -138,6 +150,7 @@ async function heartbeat(ask) {
   const b = body("b_hb");
   if (!b.session_id) b.session_id = v("sid");
   if (ask) b.extend_request_at = now();
+  if (v("applied")) b.applied_config_version = v("applied");
   const r = await call("POST", "/api/v1/heartbeat", b);
   if (r.json && r.json.commands && r.json.commands.length) $("cid").value = r.json.commands[0].id;
   if (ask) {

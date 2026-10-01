@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite" // pure Go driver "sqlite"
 )
@@ -69,10 +71,34 @@ CREATE TABLE IF NOT EXISTS commands (
   done_at    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS commands_box ON commands(box, picked_at);
+
+CREATE TABLE IF NOT EXISTS config (
+  scope      TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (scope, name)
+);
 `
+
+// migrations add columns to tables created by an older hub. A "duplicate
+// column" error means the column is already there.
+var migrations = []string{
+	`ALTER TABLE boxes ADD COLUMN applied_config_version TEXT NOT NULL DEFAULT ''`,
+}
 
 func openDB(dataDir string) (*sql.DB, error) {
 	path := filepath.Join(dataDir, "hub.db")
+	// The database holds agent keys: create it 0600 before SQLite opens it.
+	// SQLite gives the -wal and -shm files the same mode as the database.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, err
+	}
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -85,6 +111,15 @@ func openDB(dataDir string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
+	}
+	for _, side := range []string{"-wal", "-shm"} {
+		os.Chmod(path+side, 0o600) // may not exist yet; fine
 	}
 	return db, nil
 }

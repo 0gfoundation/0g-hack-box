@@ -41,20 +41,25 @@ type dashRequest struct {
 }
 
 type dashBox struct {
-	Name            string          `json:"name"`
-	Online          bool            `json:"online"`
-	LastSeen        int64           `json:"last_seen"`
-	State           string          `json:"state"`
-	SecondsLeft     int64           `json:"seconds_left"`
-	SessionID       string          `json:"session_id"`
-	Attendee        string          `json:"attendee"`
-	Agent           string          `json:"agent"`
-	StartedAt       int64           `json:"started_at"`
-	Minutes         int             `json:"minutes"`
-	ExtendedMinutes int             `json:"extended_minutes"`
-	Code            string          `json:"code"`
-	Request         *dashRequest    `json:"request"`
-	Status          json.RawMessage `json:"status"`
+	Name            string       `json:"name"`
+	Online          bool         `json:"online"`
+	LastSeen        int64        `json:"last_seen"`
+	State           string       `json:"state"`
+	SecondsLeft     int64        `json:"seconds_left"`
+	SessionID       string       `json:"session_id"`
+	Attendee        string       `json:"attendee"`
+	Agent           string       `json:"agent"`
+	StartedAt       int64        `json:"started_at"`
+	Minutes         int          `json:"minutes"`
+	ExtendedMinutes int          `json:"extended_minutes"`
+	Code            string       `json:"code"`
+	Request         *dashRequest `json:"request"`
+	// ConfigVersion is what the hub wants, AppliedConfigVersion what the box
+	// last reported. Equal means the keys on the box are up to date.
+	ConfigVersion        string          `json:"config_version"`
+	AppliedConfigVersion string          `json:"applied_config_version"`
+	ConfigUpToDate       bool            `json:"config_up_to_date"`
+	Status               json.RawMessage `json:"status"`
 }
 
 type dashSession struct {
@@ -95,7 +100,7 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 	for _, n := range s.cfg.boxNames() {
 		boxes[n] = &dashBox{Name: n, Status: json.RawMessage("{}")}
 	}
-	rows, err := s.db.Query(`SELECT name, last_seen, state, seconds_left, status_json, session_id FROM boxes`)
+	rows, err := s.db.Query(`SELECT name, last_seen, state, seconds_left, status_json, session_id, applied_config_version FROM boxes`)
 	if err != nil {
 		s.serverError(w, err)
 		return
@@ -103,7 +108,7 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var b dashBox
 		var st string
-		if err := rows.Scan(&b.Name, &b.LastSeen, &b.State, &b.SecondsLeft, &st, &b.SessionID); err != nil {
+		if err := rows.Scan(&b.Name, &b.LastSeen, &b.State, &b.SecondsLeft, &st, &b.SessionID, &b.AppliedConfigVersion); err != nil {
 			rows.Close()
 			s.serverError(w, err)
 			return
@@ -117,7 +122,18 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 		boxes[b.Name] = &bb
 	}
 	rows.Close()
+	names := make([]string, 0, len(boxes))
+	for n := range boxes {
+		names = append(names, n)
+	}
+	versions, err := s.boxConfigVersions(names)
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
 	for _, b := range boxes {
+		b.ConfigVersion = versions[b.Name]
+		b.ConfigUpToDate = b.ConfigVersion == b.AppliedConfigVersion
 		if b.SessionID != "" {
 			if ss, err := s.sessionBy("id", b.SessionID); err == nil {
 				b.Attendee, b.Agent, b.StartedAt = ss.Name, ss.Agent, ss.StartedAt

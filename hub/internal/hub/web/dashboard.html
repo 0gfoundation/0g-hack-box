@@ -75,6 +75,34 @@ a{color:var(--accent)}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(120px);background:var(--panel2);border:1px solid var(--line);padding:12px 18px;border-radius:12px;font-weight:600;transition:transform .25s;z-index:10;max-width:90vw}
 #toast.show{transform:translateX(-50%) translateY(0)}
 #toast.err{border-color:var(--bad);color:var(--bad)}
+.keys{align-self:flex-start;font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px;background:var(--panel2);color:var(--muted)}
+.keys.ok{background:rgba(56,211,159,.12);color:var(--ok)}
+.keys.pending{background:rgba(255,181,71,.12);color:var(--warn)}
+.keys:empty{display:none}
+.kp{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:6px 0}
+.krow{display:grid;grid-template-columns:150px 1fr 1fr 1.1fr auto;gap:14px;align-items:start;padding:12px 16px;border-bottom:1px solid var(--line)}
+.krow:last-child{border-bottom:0}
+.krow.head{color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;padding-top:8px;padding-bottom:8px}
+.kscope{font-weight:800;font-size:16px;padding-top:8px}
+.kscope small{display:block;font-weight:500;font-size:12px;color:var(--muted)}
+.kfield{display:flex;flex-direction:column;gap:5px}
+.kfield .lbl{display:none;color:var(--muted);font-size:12px;font-weight:600}
+.kin{display:flex;gap:6px}
+.kin input{flex:1;min-width:0;font:14px ui-monospace,SFMono-Regular,Menlo,monospace;background:#0e1118;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:9px 10px}
+.kin input:focus{outline:2px solid var(--accent);border-color:transparent}
+.kin input::placeholder{color:var(--muted);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+button.sm{padding:6px 10px;min-width:0;font-size:13px;border-radius:10px}
+.khint{font-size:12px;color:var(--muted)}
+.khint.inh{color:var(--info)}
+.agents{display:flex;flex-wrap:wrap;gap:6px 14px;padding-top:6px}
+.agents label{display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer}
+.agents input{accent-color:var(--accent);width:16px;height:16px}
+.kact{display:flex;gap:8px;padding-top:2px}
+@media (max-width:900px){
+  .krow{grid-template-columns:1fr}
+  .krow.head{display:none}
+  .kfield .lbl{display:block}
+}
 @media (max-width:600px){
   header{padding:12px 14px}
   main{padding:14px}
@@ -93,6 +121,11 @@ a{color:var(--accent)}
 <main>
   <div class="summary" id="summary"></div>
   <div class="grid" id="boxes"></div>
+  <h2>Agent keys</h2>
+  <div class="kp" id="keys">
+    <div class="krow head"><div>Scope</div><div>Anthropic API key</div><div>0G router key</div><div>Agents offered</div><div></div></div>
+  </div>
+  <div class="khint" style="margin-top:8px">Values are write-only. Boxes apply new keys at their next idle (between sessions), never during one. A box row overrides the default; clearing it falls back to the default.</div>
   <h2>History</h2>
   <div class="tablewrap">
     <table>
@@ -157,6 +190,7 @@ function makeCard(name) {
     '<div class="top"><span class="dot"></span><span class="boxname"></span><span class="spacer"></span><span class="badge"></span></div>' +
     '<div class="time idle">--:--</div>' +
     '<div class="who"><span class="name"></span><span class="meta"></span></div>' +
+    '<span class="keys"></span>' +
     '<div class="reqslot"></div>' +
     '<div class="row">' +
       '<button data-x="5">+5</button><button data-x="10">+10</button><button data-x="15">+15</button>' +
@@ -214,6 +248,10 @@ function render() {
       : (b.last_seen ? "last seen " + ago(state.now - b.last_seen) : "never seen");
     el.querySelectorAll(".row > button").forEach(btn => btn.disabled = !b.online);
     renderReq(el, b);
+    const k = $(".keys", el);
+    if (!b.config_version && !b.applied_config_version) { k.textContent = ""; k.className = "keys"; }
+    else if (b.config_up_to_date) { k.textContent = "keys up to date"; k.className = "keys ok"; }
+    else { k.textContent = "keys pending, applies at next idle"; k.className = "keys pending"; }
     el._b = b;
   });
   $("#summary").innerHTML =
@@ -276,6 +314,99 @@ async function poll() {
     $("#conndot").className = "dot off"; $("#conntext").textContent = "hub unreachable";
   } finally { polling = false; }
 }
+
+// ---- Agent keys panel --------------------------------------------------
+const KEYS = [["anthropic-api-key", "Anthropic API key"], ["0g-router-key", "0G router key"]];
+let cfg = null;
+const krows = {};
+function hhmm(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"}) : ""; }
+
+function makeKeyRow(scope) {
+  const el = document.createElement("div");
+  el.className = "krow";
+  const isAll = scope === "*";
+  let h = '<div class="kscope">' + (isAll ? 'Default<small>all boxes</small>' : esc(scope) + '<small>override</small>') + '</div>';
+  KEYS.forEach(([n, label]) => {
+    h += '<div class="kfield"><span class="lbl">' + label + '</span><div class="kin">' +
+      '<input type="password" autocomplete="new-password" spellcheck="false" data-n="' + n + '">' +
+      '<button class="sm" data-clear="' + n + '" title="Remove this value">Clear</button></div>' +
+      '<span class="khint" data-h="' + n + '"></span></div>';
+  });
+  h += '<div class="kfield"><span class="lbl">Agents offered</span><div class="agents">' +
+    cfg.known_agents.map(a => '<label><input type="checkbox" data-a="' + esc(a) + '">' + esc(a) + '</label>').join("") +
+    '</div><span class="khint" data-h="agents"></span>' +
+    '<div><button class="sm" data-clear="agents">' + (isAll ? "Clear" : "Use default") + '</button></div></div>';
+  h += '<div class="kact"><button class="ok">Save</button></div>';
+  el.innerHTML = h;
+  el._dirtyAgents = false;
+  el.querySelectorAll("input[data-a]").forEach(c => c.onchange = () => { el._dirtyAgents = true; });
+  el.querySelectorAll("button[data-clear]").forEach(b => b.onclick = () => {
+    const n = b.dataset.clear;
+    const what = n === "agents" ? "the agent choice" : n;
+    if (!confirm("Clear " + what + " for " + (isAll ? "all boxes (default)" : scope) + "?")) return;
+    saveConfig(scope, {}, [n]);
+  });
+  $("button.ok", el).onclick = () => {
+    const set = {};
+    el.querySelectorAll("input[data-n]").forEach(i => { if (i.value.trim()) set[i.dataset.n] = i.value.trim(); });
+    if (el._dirtyAgents) {
+      const list = [...el.querySelectorAll("input[data-a]:checked")].map(c => c.dataset.a);
+      if (!list.length) { toast("Pick at least one agent, or use Clear", true); return; }
+      set.agents = list.join(" ");
+    }
+    if (!Object.keys(set).length) { toast("Nothing changed", true); return; }
+    saveConfig(scope, set, []);
+  };
+  return el;
+}
+
+function renderKeys() {
+  if (!cfg) return;
+  const wrap = $("#keys");
+  cfg.scopes.forEach(sc => {
+    let el = krows[sc.scope];
+    if (!el) { el = krows[sc.scope] = makeKeyRow(sc.scope); wrap.appendChild(el); }
+    KEYS.forEach(([n]) => {
+      const st = sc.names[n], inp = $('input[data-n="' + n + '"]', el), hint = $('[data-h="' + n + '"]', el);
+      inp.value = "";
+      inp.placeholder = st.set ? "set, updated " + hhmm(st.updated_at) : (st.inherited ? "inherited from default" : "not set");
+      hint.textContent = st.set ? "" : (st.inherited ? "default set " + hhmm(st.updated_at) : "");
+      hint.className = "khint" + (st.inherited ? " inh" : "");
+      $('button[data-clear="' + n + '"]', el).disabled = !st.set;
+    });
+    const ag = sc.names.agents, own = sc.agents.length > 0;
+    const shown = own ? sc.agents : sc.effective_agents;
+    el.querySelectorAll("input[data-a]").forEach(c => { c.checked = shown.includes(c.dataset.a); });
+    el._dirtyAgents = false;
+    const ah = $('[data-h="agents"]', el);
+    ah.textContent = own ? "set, updated " + hhmm(ag.updated_at) : (ag.inherited ? "inherited from default" : "not set, the box keeps its own choice");
+    ah.className = "khint" + (ag.inherited ? " inh" : "");
+    $('button[data-clear="agents"]', el).disabled = !own;
+  });
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch("/dash/config", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    cfg = await r.json();
+    renderKeys();
+  } catch (e) { toast("Could not load agent keys: " + e.message, true); }
+}
+
+async function saveConfig(scope, set, clear) {
+  try {
+    const r = await fetch("/dash/config", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({scope: scope, set: set, clear: clear})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+    cfg = j;
+    renderKeys();
+    toast((clear.length ? "Cleared" : "Saved") + " for " + (scope === "*" ? "all boxes" : scope));
+    poll();
+  } catch (e) { toast(e.message, true); }
+}
+loadConfig();
 poll();
 setInterval(poll, 2000);
 setInterval(tick, 250);
