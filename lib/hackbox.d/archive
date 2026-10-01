@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# hackbox-help: project archives: list | get <code> [file|-] | prune (get streams when piped)
+set -euo pipefail
+A=/usr/local/sbin/hackbox-archive
+
+case "${1:-}" in
+  list)
+    sudo "$A" list
+    ;;
+  get)
+    code=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    [ -n "$code" ] || { echo "usage: hackbox archive get <code> [file|-]" >&2; exit 2; }
+    path=$(sudo "$A" path "$code")
+    # No destination: stream when stdout is redirected, else a file here.
+    if [ -z "${3:-}" ] && [ ! -t 1 ]; then out=-; else out=${3:-./$(hostname)-$code.tar.gz}; fi
+    if [ "$out" = - ]; then
+      sudo cat "$path"
+    else
+      sudo cat "$path" > "$out"
+      echo "saved $out ($(du -h "$out" | cut -f1)); unpack with: tar -xzf $out"
+    fi
+    ;;
+  prune)
+    sudo "$A" prune
+    ;;
+  *)
+    echo "usage: hackbox archive list | get <code> [file|-] | prune" >&2
+    exit 2
+    ;;
+esac

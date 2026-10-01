@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# hackbox-help: start the attendee's session now [minutes]
+set -euo pipefail
+SESSION_MINUTES=30
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+RUN=/run/hackbox
+
+minutes=${1:-$SESSION_MINUTES}
+if ! [[ $minutes =~ ^[0-9]+$ ]] || [ "$minutes" -lt 1 ] || [ "$minutes" -gt 600 ]; then
+  echo "usage: hackbox start [minutes 1-600]" >&2; exit 2
+fi
+state=$(cat "$RUN/state" 2>/dev/null || true)
+if [ "$state" != idle ]; then
+  echo "hackbox: state is '${state:-unknown}', a session can only start from idle" >&2
+  exit 1
+fi
+printf '%s\n' "$minutes" | sudo tee "$RUN/start-minutes" >/dev/null
+sudo systemctl start hackbox-session.service
+for _ in $(seq 20); do
+  [ "$(cat "$RUN/state" 2>/dev/null)" = active ] && break
+  sleep 0.25
+done
+if [ "$(cat "$RUN/state" 2>/dev/null)" = active ]; then
+  echo "session started: $minutes minutes, ends $(date -d "@$(cat "$RUN/session-end")" '+%H:%M:%S')"
+else
+  echo "hackbox: the timer did not start, see: journalctl -t hackbox-session -n 20" >&2
+  exit 1
+fi

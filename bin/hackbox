@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# hack-box admin CLI (SPEC 3.8). Run as the admin user over SSH; each
+# subcommand calls sudo itself where it needs root. `hackbox <sub> ...` runs
+# lib/hackbox.d/<sub> from the repo (installed at /opt/hack-box).
+set -euo pipefail
+
+libdir() {
+  local self here
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  here=$(cd "$(dirname "$self")/.." && pwd)
+  if [ -n "${HACKBOX_LIB:-}" ]; then echo "$HACKBOX_LIB"
+  elif [ -d "$here/lib/hackbox.d" ]; then echo "$here/lib/hackbox.d"
+  else echo /opt/hack-box/lib/hackbox.d
+  fi
+}
+LIB=$(libdir)
+
+usage() {
+  echo "usage: hackbox <command> [args]"
+  echo
+  echo "commands:"
+  local f
+  for f in "$LIB"/*; do
+    [ -f "$f" ] && [ -x "$f" ] || continue
+    case "$(basename "$f")" in _*|.*|*~) continue ;; esac
+    printf '  %-10s %s\n' "$(basename "$f")" \
+      "$(sed -n 's/^# *hackbox-help: *//p' "$f" | head -n 1)"
+  done
+}
+
+sub=${1:-}
+case "$sub" in
+  ""|-h|--help|help) usage; exit 0 ;;
+esac
+if [[ ! $sub =~ ^[a-z][a-z0-9-]*$ ]] || [ ! -x "$LIB/$sub" ] || [ -d "$LIB/$sub" ]; then
+  echo "hackbox: unknown command '$sub'" >&2
+  echo >&2
+  usage >&2
+  exit 2
+fi
+shift
+exec "$LIB/$sub" "$@"

@@ -1,0 +1,153 @@
+#!/bin/bash
+# Keep a copy of the attendee's ~/project for a few hours so work is not lost
+# when a slot ends (SPEC 3.5). Root only; archives are 0600 in a 0700 dir.
+#
+#   hackbox-archive check          exit 0 if ~/project differs from the skeleton
+#   hackbox-archive newcode        print a fresh, unused 6 character code
+#   hackbox-archive create <code>  write /var/lib/hackbox/archive/<code>.tar.gz
+#   hackbox-archive list           code, time, size of each archive
+#   hackbox-archive path <code>    print the archive's path (exit 1 if none)
+#   hackbox-archive prune          delete archives older than ARCHIVE_HOURS
+#
+# What is left out: dependency and build directories, secret-looking files
+# (.env, keys), .git objects when .git is larger than ARCHIVE_GIT_MAX_MB, and
+# files beyond an ARCHIVE_MAX_MB total (smallest files are kept first, so the
+# source survives and big binaries go).
+set -euo pipefail
+export LC_ALL=C
+
+HACKER_USER=hacker ARCHIVE_HOURS=24 ARCHIVE_MAX_MB=200 ARCHIVE_GIT_MAX_MB=50
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+
+HOMEDIR=${HB_ARCHIVE_HOME:-/home/$HACKER_USER}
+SRC=$HOMEDIR/project
+SKEL=/etc/hackbox/skel/project
+DST=${HB_ARCHIVE_DIR:-/var/lib/hackbox/archive}
+ALPHABET=ABCDEFGHJKLMNPQRSTUVWXYZ23456789   # no 0/O, 1/I
+
+EXCLUDE_DIRS=(node_modules .next .nuxt .svelte-kit .turbo .cache .parcel-cache .vite
+  dist build out target coverage __pycache__ .venv venv .pnpm-store .yarn
+  artifacts cache typechain-types .hardhat .foundry)
+EXCLUDE_FILES=('.env' '.env.*' '*.pem' '*.key' 'id_rsa*' 'id_ed25519*' 'id_ecdsa*'
+  '.git-credentials' '*.keystore' '.npmrc' '.DS_Store')
+
+die() { echo "hackbox-archive: $*" >&2; exit 1; }
+valid_code() { [[ ${1:-} =~ ^[A-HJ-NP-Z2-9]{6}$ ]]; }
+
+# NUL separated "size<TAB>path" for every candidate file, paths relative to
+# the home (project/...). Never follows symlinks; symlinks are kept as links.
+candidates() {
+  local prune=() g
+  cd "$HOMEDIR" || return 0
+  for g in "${EXCLUDE_DIRS[@]}"; do prune+=(-name "$g" -o); done
+  # .git directories over the cap lose their objects.
+  while IFS= read -r -d '' g; do
+    if [ "$(du -sm "$g" 2>/dev/null | cut -f1)" -gt "$ARCHIVE_GIT_MAX_MB" ]; then
+      prune+=(-path "$g/objects" -o -path "$g/lfs" -o)
+    fi
+  done < <(find project -xdev -maxdepth 4 -type d -name .git -print0 2>/dev/null)
+  prune+=(-false)
+  local notfile=()
+  for g in "${EXCLUDE_FILES[@]}"; do notfile+=(! -name "$g"); done
+  find project -xdev \( -type d \( "${prune[@]}" \) \) -prune -o \
+    \( -type f -o -type l \) "${notfile[@]}" -printf '%s\t%p\0' 2>/dev/null
+}
+
+# True if the project has anything the attendee made or changed.
+cmd_check() {
+  [ -d "$SRC" ] || return 1
+  local size path
+  while IFS=$'\t' read -r -d '' size path; do
+    # Compare regular files only: cmp follows symlinks, and a link to a FIFO
+    # would block a root process forever.
+    if [ -f "$HOMEDIR/$path" ] && [ ! -L "$HOMEDIR/$path" ] && [ -f "$SKEL/${path#project/}" ] &&
+       timeout 5 cmp -s "$HOMEDIR/$path" "$SKEL/${path#project/}"; then
+      continue
+    fi
+    return 0
+  done < <(candidates)
+  return 1
+}
+
+cmd_newcode() {
+  local code i
+  for i in $(seq 20); do
+    # tr's stderr dropped: head closing the pipe makes it log "write error:
+    # Broken pipe" into the journal on every code.
+    code=$(tr -dc "$ALPHABET" < /dev/urandom 2>/dev/null | head -c 6 || true)
+    valid_code "$code" && [ ! -e "$DST/$code.tar.gz" ] && { echo "$code"; return 0; }
+  done
+  die "could not make a code"
+}
+
+LIST= TMP=
+cmd_create() {
+  local code=${1:-} cap total=0 n=0 dropped=0 size path rcs
+  valid_code "$code" || die "bad code '$code'"
+  [ -d "$SRC" ] || exit 0
+  cmd_check || exit 0            # nothing but the untouched skeleton
+  install -d -m 0700 -o root -g root "$DST"
+  local avail
+  avail=$(df -Pm "$DST" | awk 'NR==2 {print $4}')
+  [ "${avail:-0}" -gt $(( ARCHIVE_MAX_MB + 1024 )) ] || die "less than $(( ARCHIVE_MAX_MB + 1024 )) MB free, not archiving"
+  cap=$(( ARCHIVE_MAX_MB * 1024 * 1024 ))
+  LIST=$(mktemp)
+  TMP="$DST/.$code.tar.gz.part"
+  trap 'rm -f "$LIST" "$TMP"' EXIT
+  # Smallest first until the cap: source files always fit, big blobs drop.
+  while IFS=$'\t' read -r -d '' size path; do
+    if [ $(( total + size )) -gt "$cap" ]; then dropped=$(( dropped + 1 )); continue; fi
+    total=$(( total + size )); n=$(( n + 1 ))
+    printf '%s\0' "$path" >> "$LIST"
+  done < <(candidates | sort -z -n)
+  [ "$n" -gt 0 ] || exit 0
+  umask 077
+  # tar exits 1 for "file changed as we read it"; that archive is still good.
+  set +e
+  tar -C "$HOMEDIR" --null --verbatim-files-from --no-recursion -T "$LIST" \
+      -cf - 2>/dev/null | gzip -1 > "$TMP"
+  rcs=("${PIPESTATUS[@]}")
+  set -e
+  [ "${rcs[0]}" -le 1 ] && [ "${rcs[1]}" -eq 0 ] || die "tar/gzip failed (${rcs[*]})"
+  chmod 0600 "$TMP"
+  mv -f "$TMP" "$DST/$code.tar.gz"
+  logger -t hackbox-archive -- "archived $n files ($(( total / 1048576 )) MB before compression, $dropped over the cap) as $code"
+}
+
+cmd_list() {
+  [ -d "$DST" ] || exit 0
+  local f
+  # Header only for a person; scripts get bare rows.
+  [ -t 1 ] && printf '%-8s %-19s %8s\n' CODE CREATED SIZE
+  find "$DST" -maxdepth 1 -type f -name '*.tar.gz' -printf '%T@ %p\n' | sort -n |
+    while read -r _ f; do
+      printf '%-8s %-19s %8s\n' "$(basename "$f" .tar.gz)" \
+        "$(date -d "@$(stat -c %Y "$f")" '+%Y-%m-%d %H:%M:%S')" "$(du -h "$f" | cut -f1)"
+    done
+}
+
+cmd_path() {
+  local code
+  code=$(echo "${1:-}" | tr '[:lower:]' '[:upper:]')
+  valid_code "$code" || die "bad code '${1:-}'"
+  [ -f "$DST/$code.tar.gz" ] || die "no archive $code"
+  echo "$DST/$code.tar.gz"
+}
+
+cmd_prune() {
+  [ -d "$DST" ] || exit 0
+  local mins=$(( ARCHIVE_HOURS * 60 ))
+  find "$DST" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '.*.part' \) -mmin +"$mins" \
+    -print -delete | while read -r f; do logger -t hackbox-archive -- "pruned $(basename "$f")"; done
+}
+
+[ "$(id -u)" -eq 0 ] || die "run as root"
+case "${1:-}" in
+  check)   cmd_check ;;
+  newcode) cmd_newcode ;;
+  create)  cmd_create "${2:-}" ;;
+  list)    cmd_list ;;
+  path)    cmd_path "${2:-}" ;;
+  prune)   cmd_prune ;;
+  *)       die "usage: hackbox-archive check|newcode|create <code>|list|path <code>|prune" ;;
+esac

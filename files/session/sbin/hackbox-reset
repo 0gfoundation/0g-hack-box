@@ -1,0 +1,356 @@
+#!/bin/bash
+# Wipe the attendee session and bring the box back to a fresh, idle welcome
+# screen. Runs as root, normally as hackbox-reset.service; at boot as
+# hackbox-home.service with --boot (no ending screen, no archive, no LightDM
+# restart, because LightDM starts after us).
+#
+# Order (SPEC 3.3): ending screen if a session is live, mark resetting, stop
+# the timer and LightDM, kill everything the attendee owns, archive
+# ~/project, clean the attendee's traces outside the home, unmount, build a
+# new image, seed the skeleton, run /etc/hackbox/reset.d hooks, idle, start
+# LightDM (autologin brings up the welcome screen).
+#
+# An immediate reset (no ending screen) is requested by creating
+# /run/hackbox/reset-now before starting the unit. Only root can: the
+# directory is root-owned.
+#
+# Deliberately no `set -e`: every step is best effort with a timeout, and the
+# one hard promise is that the box never ends up without a mounted home
+# (ensure_home falls back to a tmpfs home if the image cannot be built).
+set -uo pipefail
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
+HACKER_USER=hacker HACKER_UID=2000 END_GRACE_SECONDS=20
+HOME_IMG_SIZE=40G HOME_IMG_RESERVE=4G
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+
+U=$HACKER_USER
+UIDN=$HACKER_UID
+H=/home/$U
+IMG=/var/lib/hackbox/home.img
+SKEL=/etc/hackbox/skel
+HOOKS=/etc/hackbox/reset.d
+RUN=/run/hackbox
+STATE_DIR=/var/lib/hackbox
+ARCHIVE=/usr/local/sbin/hackbox-archive
+MODE=service
+[ "${1:-}" = --boot ] && MODE=boot
+
+# ============================================================== helpers ===
+
+log() {
+  logger -t hackbox-reset -- "$*"
+  [ -t 2 ] && echo "hackbox-reset: $*" >&2
+  return 0
+}
+
+# Atomic write of a world-readable runtime file (the overlay reads them).
+put() {
+  printf '%s\n' "$2" > "$RUN/.$1.tmp" && chmod 0644 "$RUN/.$1.tmp" &&
+    mv -f "$RUN/.$1.tmp" "$RUN/$1"
+}
+state() { cat "$RUN/state" 2>/dev/null || true; }
+
+kill_user() {
+  local cg=/sys/fs/cgroup/user.slice/user-$UIDN.slice i
+  # cgroup.kill (kernel 5.14+) kills the whole tree atomically, so a fork
+  # bomb cannot outrun it.
+  [ -w "$cg/cgroup.kill" ] && echo 1 > "$cg/cgroup.kill" 2>/dev/null
+  timeout 5 loginctl terminate-user "$U" 2>/dev/null
+  timeout 5 systemctl kill --signal=SIGKILL "user-$UIDN.slice" 2>/dev/null
+  for i in $(seq 50); do
+    pkill -KILL -u "$UIDN" 2>/dev/null
+    pgrep -u "$UIDN" >/dev/null || break
+    [ -w "$cg/cgroup.kill" ] && echo 1 > "$cg/cgroup.kill" 2>/dev/null
+    sleep 0.1
+  done
+  if pgrep -u "$UIDN" >/dev/null; then
+    log "processes survived SIGKILL (stuck in D state?): $(pgrep -u "$UIDN" | tr '\n' ' ')"
+  fi
+  timeout 10 systemctl stop "user@$UIDN.service" "user-runtime-dir@$UIDN.service" 2>/dev/null
+}
+
+# Anything the attendee mounted: FUSE mounts, USB sticks under /media/<user>,
+# submounts of the home, a leftover /run/user/<uid>. Deepest first, lazy.
+unmount_user_mounts() {
+  findmnt -rn -o TARGET,FSTYPE,OPTIONS 2>/dev/null | while read -r t fs opts; do
+    t=$(printf '%b' "$t")
+    case "$t" in
+      "$H"/*|/media/"$U"/*|/run/user/"$UIDN"|/run/user/"$UIDN"/*) echo "$t"; continue ;;
+    esac
+    case "$fs,$opts" in
+      fuse*user_id="$UIDN",*|fuse*user_id="$UIDN") echo "$t" ;;
+    esac
+  done | sort -r | while read -r t; do
+    timeout 5 umount -l "$t" 2>/dev/null && log "unmounted $t"
+  done
+}
+
+clean_outside() {
+  local d t
+  loginctl disable-linger "$U" 2>/dev/null
+  rm -f "/var/lib/systemd/linger/$U"
+  crontab -r -u "$U" 2>/dev/null
+  if command -v atq >/dev/null; then
+    atq 2>/dev/null | awk -v u="$U" '$NF==u {print $1}' | while read -r j; do atrm "$j"; done
+  fi
+  for d in /tmp /var/tmp /dev/shm /dev/mqueue; do
+    [ -d "$d" ] && timeout 10 find "$d" -xdev -mindepth 1 -user "$UIDN" -delete 2>/dev/null
+  done
+  for t in m s q; do
+    ipcs -"$t" 2>/dev/null | awk -v u="$U" -v n="$UIDN" '$3==u || $3==n {print $2}' |
+      while read -r id; do ipcrm -"$t" "$id" 2>/dev/null; done
+  done
+  [ -d /var/lib/systemd/coredump ] &&
+    find /var/lib/systemd/coredump -name "core.*.$UIDN.*" -delete 2>/dev/null
+  [ -d /var/crash ] && find /var/crash -mindepth 1 -maxdepth 1 -user "$UIDN" -delete 2>/dev/null
+  [ -f "/var/mail/$U" ] && : > "/var/mail/$U"
+  rm -rf "/var/lib/lightdm-data/$U" "/var/lib/AccountsService/icons/$U"
+  if [ -d /var/lib/AccountsService/users ]; then
+    printf '[User]\nSession=cinnamon\nXSession=cinnamon\nSystemAccount=false\n' \
+      > "/var/lib/AccountsService/users/$U"
+  fi
+  # The attendee's own journal files (only archived ones; journald owns the
+  # active file).
+  timeout 5 journalctl --rotate >/dev/null 2>&1
+  rm -f /var/log/journal/*/user-"$UIDN"@*.journal 2>/dev/null
+}
+
+unmount_home() {
+  local i
+  for i in 1 2 3 4 5; do
+    mountpoint -q "$H" || return 0
+    if ! timeout 10 umount "$H" 2>/dev/null; then
+      log "home busy, lazy unmount"
+      timeout 5 umount -l "$H" 2>/dev/null
+    fi
+  done
+  mountpoint -q "$H" && log "home still mounted after 5 unmount attempts"
+  return 0
+}
+
+bytes() { numfmt --from=iec "$1" 2>/dev/null || echo 0; }
+
+# Reserve real blocks for the image (fallocate) so a full home can never
+# fill the root filesystem. If the disk is too small, shrink the image.
+alloc_image() {
+  local want reserve avail size
+  want=$(bytes "$HOME_IMG_SIZE"); reserve=$(bytes "$HOME_IMG_RESERVE")
+  [ "$want" -gt 0 ] 2>/dev/null || want=$(( 40 * 1024 * 1024 * 1024 ))
+  [ "$reserve" -ge 0 ] 2>/dev/null || reserve=0
+  avail=$(df -B1 --output=avail "$STATE_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')
+  [[ $avail =~ ^[0-9]+$ ]] || avail=0
+  size=$want
+  if [ $(( avail - reserve )) -lt "$want" ]; then
+    size=$(( (avail - reserve) / 1048576 * 1048576 ))
+    log "only $(( avail / 1048576 )) MB free, home image shrunk to $(( size / 1048576 )) MB"
+  fi
+  if [ "$size" -lt $(( 1024 * 1048576 )) ]; then
+    log "not enough disk to reserve an image, using a sparse $HOME_IMG_SIZE file"
+    truncate -s "$want" "$1"
+    return
+  fi
+  fallocate -l "$size" "$1" 2>/dev/null || truncate -s "$size" "$1"
+}
+
+make_home() {
+  rm -f "$IMG" "$IMG.new"
+  alloc_image "$IMG.new" || return 1
+  chmod 0600 "$IMG.new"
+  # No journal: the image never outlives a session, so crash consistency
+  # buys nothing. Lazy inode table init keeps mkfs near a second on 40G.
+  # -i 8192 doubles the inode count because node_modules is inode heavy.
+  timeout 60 mkfs.ext4 -q -F -m 0 -i 8192 -L hackbox-home -O ^has_journal \
+    -E lazy_itable_init=1,nodiscard,root_owner="$UIDN:$UIDN" "$IMG.new" || return 1
+  mv -f "$IMG.new" "$IMG"
+  timeout 20 mount -t ext4 -o loop,nosuid,nodev,noatime "$IMG" "$H" || return 1
+  mountpoint -q "$H"
+}
+
+# Last resort so the box is never left without a home: a RAM home. Logged
+# loudly and flagged in /run/hackbox/degraded for `hackbox status`.
+fallback_home() {
+  log "ERROR: could not build the home image, mounting a tmpfs home instead"
+  mount -t tmpfs -o size=4G,mode=0700,uid="$UIDN",gid="$UIDN",nosuid,nodev hackbox-home "$H" &&
+    put degraded "tmpfs home since $(date -Is)"
+}
+
+prepare_mountpoint() {
+  mountpoint -q "$H" && return 0
+  if [ ! -d "$H" ] || [ -L "$H" ]; then
+    rm -f "$H" 2>/dev/null
+    install -d -m 0755 -o root -g root "$H"
+  fi
+  # Only ever on the bare mount point, never on a mounted home: an unmounted
+  # home then fails loudly instead of filling the root filesystem.
+  chattr +i "$H" 2>/dev/null
+  return 0
+}
+
+ensure_home() {
+  mountpoint -q "$H" && return 0
+  prepare_mountpoint
+  if ! make_home; then
+    unmount_home
+    rm -f "$IMG" "$IMG.new"
+    fallback_home
+  fi
+}
+
+seed_home() {
+  mountpoint -q "$H" || { log "ERROR: no home mounted, cannot seed it"; return 1; }
+  # setup/60-hacker.sh swaps the skeleton with two renames; ride out the gap.
+  local i
+  for i in 1 2 3 4 5 6; do [ -d "$SKEL" ] && break; sleep 0.5; done
+  if [ -d "$SKEL" ]; then
+    cp -a "$SKEL/." "$H/" || log "skeleton copy failed"
+  else
+    log "no skeleton at $SKEL"
+  fi
+  rm -rf "$H/lost+found"
+  install -d -m 0755 "$H/project"
+  chown -hR "$UIDN:$UIDN" "$H"
+  chmod 0700 "$H"
+}
+
+run_hooks() {
+  local hook name rc
+  [ -d "$HOOKS" ] || return 0
+  for hook in "$HOOKS"/*; do
+    [ -f "$hook" ] && [ -x "$hook" ] || continue
+    name=$(basename "$hook")
+    case "$name" in *~|*.dpkg-*|*.bak|*.disabled|.*) continue ;; esac
+    HB_HOME="$H" HB_USER="$U" HB_UID="$UIDN" timeout 60 "$hook" </dev/null 2>&1 |
+      sed -u "s|^|hook $name: |" | logger -t hackbox-reset
+    rc=${PIPESTATUS[0]}
+    [ "$rc" -eq 0 ] || log "hook $name failed with status $rc (continuing)"
+  done
+}
+
+# Killed half way (systemd timeout, admin): keep a home mounted and the
+# display up, and leave the state as it is. hackbox-guard sees a stuck
+# ending/resetting state and runs a fresh reset 30 seconds later.
+on_term() {
+  log "reset interrupted, making sure a home is mounted"
+  ensure_home
+  [ "$MODE" = service ] && systemctl --no-block start lightdm.service
+  exit 1
+}
+
+# ================================================================= main ===
+
+install -d -m 0755 -o root -g root "$RUN" "$STATE_DIR"
+
+# One reset at a time. A second caller (the boot unit racing the service, a
+# double click) just leaves: the running reset does the job.
+exec 9>"$RUN/reset.lock"
+if ! flock -n 9; then
+  log "another reset is already running, nothing to do"
+  exit 0
+fi
+trap on_term TERM INT
+
+NOW=0
+[ -e "$RUN/reset-now" ] && NOW=1
+
+# --- ending: a live timed session gets the "time is up" screen first.
+if [ "$MODE" = service ] && [ "$NOW" = 0 ] && [ "$(state)" = active ]; then
+  put state ending
+  timeout 10 systemctl stop hackbox-session.service 2>/dev/null
+  if [ ! -s "$RUN/code" ] && timeout 20 "$ARCHIVE" check; then
+    put code "$("$ARCHIVE" newcode)"
+  fi
+  grace=$END_GRACE_SECONDS
+  [[ $grace =~ ^[0-9]+$ ]] || grace=20
+  put ending-until $(( $(date +%s) + grace ))
+  log "session ending, archive code $(cat "$RUN/code" 2>/dev/null || echo none), wipe in ${grace}s"
+  for _ in $(seq "$grace"); do
+    [ -e "$RUN/reset-now" ] && { log "immediate reset requested during the grace period"; break; }
+    sleep 1
+  done
+fi
+
+T0=$(date +%s.%N)
+put generation "$(date +%s%N)"
+put state resetting
+log "reset starting (mode $MODE)"
+
+# --- stop the clock and the display manager.
+timeout 10 systemctl stop hackbox-session.service 2>/dev/null
+if [ "$MODE" = service ]; then
+  # Stopping LightDM (instead of letting the session die under it) means it
+  # cannot autologin into a half-built home. It is started again at the end.
+  # The stop waits for the attendee's session scope, and cinnamon-session
+  # sometimes ignores SIGTERM until systemd's 10 s stop timeout (seen on the
+  # lab VM). So queue the stop, then kill the attendee's cgroup at once (the
+  # attendee is killed a moment later anyway), and wait for LightDM to go.
+  systemctl stop --no-block lightdm.service 2>/dev/null
+  sleep 0.2
+  cg=/sys/fs/cgroup/user.slice/user-$UIDN.slice
+  [ -w "$cg/cgroup.kill" ] && echo 1 > "$cg/cgroup.kill" 2>/dev/null
+  for _ in $(seq 100); do
+    case "$(systemctl show -p ActiveState --value lightdm.service 2>/dev/null)" in
+      inactive|failed) break ;;
+    esac
+    sleep 0.2
+  done
+  case "$(systemctl show -p ActiveState --value lightdm.service 2>/dev/null)" in
+    inactive|failed) ;;
+    *) log "lightdm did not stop in time, killing it"
+       systemctl kill -s KILL lightdm.service 2>/dev/null ;;
+  esac
+fi
+
+# --- the attendee's processes and mounts.
+kill_user
+unmount_user_mounts
+
+# --- archive: after the kill (files closed and consistent), before the wipe.
+if [ "$MODE" = service ] && mountpoint -q "$H"; then
+  if [ ! -s "$RUN/code" ] && timeout 20 "$ARCHIVE" check; then
+    # Session ended without an ending screen (logout, crash, admin reset):
+    # still keep the work, staff find it by time with `hackbox archive list`.
+    put code "$("$ARCHIVE" newcode)"
+  fi
+  if [ -s "$RUN/code" ]; then
+    code=$(cat "$RUN/code")
+    if timeout 90 "$ARCHIVE" create "$code"; then
+      log "project archived as $code"
+    else
+      log "archive $code failed or timed out"
+    fi
+  fi
+fi
+
+# --- traces outside the home.
+clean_outside
+
+# --- the new home.
+unmount_home
+rm -f "$RUN/degraded"
+ensure_home
+seed_home
+
+# --- hooks (after the skeleton, before LightDM comes back).
+run_hooks
+
+# --- idle.
+rm -f "$RUN/session-end" "$RUN/ending-until" "$RUN/code" "$RUN/warn" \
+      "$RUN/start-minutes" "$RUN/reset-now"
+put state idle
+trap - TERM INT
+
+if [ "$MODE" = service ]; then
+  systemctl reset-failed lightdm.service 2>/dev/null
+  systemctl --no-block start lightdm.service
+fi
+
+T1=$(date +%s.%N)
+dur=$(awk -v a="$T0" -v b="$T1" 'BEGIN { printf "%.1f", b - a }')
+printf '%s %s\n' "$(date +%s)" "$dur" > "$STATE_DIR/.last-reset.tmp" &&
+  chmod 0644 "$STATE_DIR/.last-reset.tmp" &&
+  mv -f "$STATE_DIR/.last-reset.tmp" "$STATE_DIR/last-reset"
+log "reset done in ${dur}s (mode $MODE)"
+exit 0

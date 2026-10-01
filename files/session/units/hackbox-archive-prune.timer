@@ -1,0 +1,12 @@
+# hack-box: hourly, so an archive is gone within an hour of its deadline
+# (systemd-tmpfiles age cleanup only runs daily).
+[Unit]
+Description=hack-box archive prune, hourly
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

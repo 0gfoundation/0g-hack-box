@@ -1,0 +1,7 @@
+# hack-box: delete project archives older than ARCHIVE_HOURS.
+[Unit]
+Description=hack-box archive prune
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hackbox-archive prune

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# hackbox-help: add minutes to the running session <minutes>
+set -euo pipefail
+RUN=/run/hackbox
+
+minutes=${1:-}
+if ! [[ $minutes =~ ^[0-9]+$ ]] || [ "$minutes" -lt 1 ] || [ "$minutes" -gt 600 ]; then
+  echo "usage: hackbox extend <minutes 1-600>" >&2; exit 2
+fi
+state=$(cat "$RUN/state" 2>/dev/null || true)
+if [ "$state" != active ]; then
+  echo "hackbox: state is '${state:-unknown}', only an active session can be extended" >&2
+  exit 1
+fi
+# The timer rereads session-end every second; write it atomically as root.
+sudo bash -c '
+  set -euo pipefail
+  end=$(cat /run/hackbox/session-end)
+  [[ $end =~ ^[0-9]+$ ]] || { echo "hackbox: no valid session-end" >&2; exit 1; }
+  new=$(( end + $1 * 60 ))
+  printf "%s\n" "$new" > /run/hackbox/.session-end.tmp
+  chmod 0644 /run/hackbox/.session-end.tmp
+  mv -f /run/hackbox/.session-end.tmp /run/hackbox/session-end
+  logger -t hackbox-session -- "extended by $1 minutes by ${SUDO_USER:-root}"
+' hackbox-extend "$minutes"
+end=$(cat "$RUN/session-end")
+left=$(( end - $(date +%s) ))
+printf 'extended by %s minutes: ends %s, %d:%02d left\n' "$minutes" \
+  "$(date -d "@$end" '+%H:%M:%S')" $(( left / 60 )) $(( left % 60 ))

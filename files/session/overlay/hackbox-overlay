@@ -1,0 +1,642 @@
+#!/usr/bin/env python3
+"""hack-box overlay: the attendee-facing face of the session engine.
+
+Runs as the attendee inside the Cinnamon session (autostarted from the
+skeleton, relaunched by hackbox-guard if killed). It is only a display: it
+reads the state that root writes to /run/hackbox and asks systemd (through
+the polkit rule) to start the session timer or the reset. Killing it changes
+nothing about the clock.
+
+Faces, by /run/hackbox/state (SPEC 3.2 and 3.6):
+  idle       full-screen welcome, rules, one Start button per agent
+  active     small always-on-top countdown pill with "End now"
+  ending     full-screen "Time is up" with the archive code
+  resetting  full-screen "Resetting"
+
+Python 3 and GTK 3 through gi only (both ship with Mint Cinnamon). No GL.
+"""
+
+import fcntl
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+RUN = "/run/hackbox"
+AGENTS_FILE = "/etc/hackbox/agents.json"
+HOME = os.path.expanduser("~")
+PROJECT = os.path.join(HOME, "project")
+TERMINAL_PROFILE = os.path.join(HOME, ".config", "hackbox", "gnome-terminal.dconf")
+TERMINAL_PROFILE_PATH = "/org/gnome/terminal/legacy/profiles:/:b1dcc9dd-5262-4d8d-a863-c897e6d979b9/"
+
+# Shown after an agent exits, so the attendee is left in a usable shell.
+AGENT_WRAPPER = (
+    'eval "$1"; rc=$?; echo; '
+    'echo "[hack-box] $2 exited (status $rc). This is a normal shell in ~/project."; '
+    'echo "[hack-box] Run the agent again with: $1"; '
+    "exec bash -i"
+)
+
+
+# --------------------------------------------------------------- inputs ---
+
+def load_conf():
+    """Source /etc/hackbox/conf.d the same way the shell helpers do."""
+    conf = {"SESSION_MINUTES": "30", "WARN_MINUTES": "5 1",
+            "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24"}
+    script = ('for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done; '
+              'printf "%s\\n" "$SESSION_MINUTES" "$WARN_MINUTES" "$END_GRACE_SECONDS" "$ARCHIVE_HOURS"')
+    try:
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                             timeout=5, env={"PATH": "/usr/bin:/bin"}).stdout.split("\n")
+        for key, val in zip(("SESSION_MINUTES", "WARN_MINUTES", "END_GRACE_SECONDS",
+                             "ARCHIVE_HOURS"), out):
+            if val.strip():
+                conf[key] = val.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return conf
+
+
+def as_int(value, default):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def load_agents():
+    """Entries from agents.json (SPEC 3.7). Empty list means generic mode."""
+    try:
+        with open(AGENTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    agents = []
+    if not isinstance(data, list):
+        return []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        label, command = entry.get("label"), entry.get("command")
+        if not isinstance(label, str) or not isinstance(command, str):
+            continue
+        if not label.strip() or not command.strip():
+            continue
+        note = entry.get("note") if isinstance(entry.get("note"), str) else ""
+        agents.append({"id": str(entry.get("id", label)), "label": label.strip(),
+                       "command": command.strip(), "note": note.strip()})
+    return agents
+
+
+def read_run(name):
+    try:
+        with open(os.path.join(RUN, name), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def read_run_int(name):
+    return as_int(read_run(name), None)
+
+
+# -------------------------------------------------------------- actions ---
+
+def start_unit(unit, done):
+    """systemctl start --no-block <unit> in a thread; done(ok, message) on
+    the GTK main loop. The polkit rule decides; nothing here is trusted."""
+    def work():
+        try:
+            r = subprocess.run(["systemctl", "start", "--no-block", unit],
+                               capture_output=True, text=True, timeout=20)
+            ok, msg = r.returncode == 0, (r.stderr or r.stdout).strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            ok, msg = False, str(e)
+        GLib.idle_add(done, ok, msg)
+    threading.Thread(target=work, daemon=True).start()
+
+
+def open_terminal(agent=None):
+    """A terminal in ~/project, running the agent if given, else a shell."""
+    os.makedirs(PROJECT, exist_ok=True)
+    if agent:
+        inner = ["bash", "-lc", AGENT_WRAPPER, "hackbox-agent", agent["command"], agent["label"]]
+    else:
+        inner = ["bash", "-l"]
+    if shutil.which("gnome-terminal"):
+        argv = ["gnome-terminal", "--maximize", "--working-directory=" + PROJECT, "--"] + inner
+    elif shutil.which("x-terminal-emulator"):
+        argv = ["x-terminal-emulator", "-e"] + inner
+    else:
+        return False
+    try:
+        subprocess.Popen(argv, cwd=PROJECT, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        return False
+
+
+def apply_terminal_profile():
+    """Load the skeleton's gnome-terminal profile once per fresh home."""
+    marker = os.path.join(HOME, ".cache", "hackbox", "terminal-profile-applied")
+    if os.path.exists(marker) or not os.path.exists(TERMINAL_PROFILE) or not shutil.which("dconf"):
+        return
+    try:
+        with open(TERMINAL_PROFILE, "rb") as f:
+            subprocess.run(["dconf", "load", TERMINAL_PROFILE_PATH], stdin=f,
+                           timeout=10, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        open(marker, "w").close()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+# ---------------------------------------------------------------- style ---
+
+CSS_TEMPLATE = """
+.hb-full { background-color: #0d1117; }
+.hb-full label { color: #e6edf3; }
+.hb-brand { font-size: {brand}px; font-weight: bold; color: #7ee787;
+            letter-spacing: 2px;
+}
+.hb-title { font-size: {title}px; font-weight: bold; }
+.hb-body  { font-size: {body}px; color: #c9d1d9; }
+.hb-muted { font-size: {small}px; color: #8b949e; }
+.hb-code  { font-size: {code}px; font-weight: bold; font-family: monospace;
+            color: #f0f6fc;
+            letter-spacing: 8px;
+}
+.hb-error { font-size: {small}px; color: #ff7b72; }
+.hb-rule  { font-size: {body}px; color: #e6edf3; }
+.hb-start { font-size: {button}px; font-weight: bold; padding: {bpad_v}px {bpad_h}px;
+            border-radius: 12px; background-image: none; background-color: #238636;
+            color: #ffffff; border: none; }
+.hb-start:hover { background-color: #2ea043; }
+.hb-start:disabled { background-color: #30363d; color: #8b949e; }
+.hb-start label { color: #ffffff; }
+.hb-note  { font-size: {small}px; color: #d2f4dc; font-weight: normal; }
+.hb-pill  { background-color: #0d1117; border-radius: 10px; border: 2px solid #30363d; }
+.hb-pill label { color: #e6edf3; font-family: monospace; font-weight: bold;
+                 font-size: {pill}px; padding: 2px 8px; }
+.hb-pill.warn { border-color: #d29922; }
+.hb-pill.warn label { color: #f2cc60; }
+.hb-pill.crit { border-color: #f85149; background-color: #3d0f0f; }
+.hb-pill.crit label { color: #ff7b72; }
+.hb-endbtn { font-size: {pillbtn}px; padding: 2px 10px; background-image: none;
+             background-color: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+.hb-toast { background-color: #3d2e00; border: 3px solid #d29922; border-radius: 14px; }
+.hb-toast.crit { background-color: #3d0f0f; border-color: #f85149; }
+.hb-toast label { color: #ffffff; font-size: {toast}px; font-weight: bold; }
+"""
+
+
+def scale_factor():
+    """Type grows with the primary monitor's logical height, so a 4K screen
+    at scale 1 gets the same physical size as 1080p (at scale 2 GTK already
+    doubles everything and this stays 1)."""
+    display = Gdk.Display.get_default()
+    mon = display.get_primary_monitor() or display.get_monitor(0)
+    if mon is None:
+        return 1.0
+    h = mon.get_geometry().height
+    return max(0.8, min(3.0, h / 1080.0))
+
+
+def install_css(provider):
+    f = scale_factor()
+    sizes = {"brand": 22, "title": 64, "body": 26, "small": 18, "code": 96,
+             "button": 30, "bpad_v": 18, "bpad_h": 40, "pill": 22, "pillbtn": 15,
+             "toast": 30}
+    css = CSS_TEMPLATE
+    for key, px in sizes.items():
+        css = css.replace("{" + key + "}", str(int(round(px * f))))
+    try:
+        provider.load_from_data(css.encode())
+    except GLib.Error:
+        # A property this GTK does not know must not take the overlay down.
+        css = "\n".join(l for l in css.split("\n") if "letter-spacing" not in l)
+        try:
+            provider.load_from_data(css.encode())
+        except GLib.Error:
+            pass
+
+
+def primary_geometry():
+    display = Gdk.Display.get_default()
+    mon = display.get_primary_monitor() or display.get_monitor(0)
+    return mon.get_geometry()
+
+
+def label(text="", css=None, wrap=False, xalign=0.5):
+    w = Gtk.Label(label=text)
+    w.set_xalign(xalign)
+    w.set_justify(Gtk.Justification.CENTER)
+    if wrap:
+        w.set_line_wrap(True)
+        w.set_max_width_chars(70)
+    if css:
+        w.get_style_context().add_class(css)
+    return w
+
+
+# -------------------------------------------------------------- windows ---
+
+class FullScreen(Gtk.Window):
+    """Welcome, time-up and resetting faces. Covers the primary monitor."""
+
+    def __init__(self, app):
+        super().__init__(title="hack-box")
+        self.app = app
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.stick()
+        self.get_style_context().add_class("hb-full")
+        self.connect("delete-event", lambda *_: True)   # Alt+F4 does nothing
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        self.add(self.stack)
+        self.stack.add_named(self._build_welcome(), "welcome")
+        self.stack.add_named(self._build_ending(), "ending")
+        self.stack.add_named(self._build_resetting(), "resetting")
+        self.face = None
+
+    def _column(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_valign(Gtk.Align.CENTER)
+        return box
+
+    def _build_welcome(self):
+        conf = self.app.conf
+        minutes = as_int(conf["SESSION_MINUTES"], 30)
+        box = self._column()
+        box.pack_start(label("0G HACK-BOX  ·  " + socket.gethostname(), "hb-brand"), False, False, 0)
+        box.pack_start(label("Build something on 0G.", "hb-title"), False, False, 12)
+        rules = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        rules.set_halign(Gtk.Align.CENTER)
+        for line in (
+            "You get %d minutes. The clock starts when you press a button below." % minutes,
+            "When time is up this machine is wiped. Push your work to GitHub as you go.",
+            "Do not enter personal passwords, wallet seeds or private keys here.",
+        ):
+            rules.pack_start(label("•  " + line, "hb-rule", xalign=0.0), False, False, 0)
+        box.pack_start(rules, False, False, 24)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=28)
+        buttons.set_halign(Gtk.Align.CENTER)
+        self.start_buttons = []
+        agents = self.app.agents
+        if agents:
+            for agent in agents:
+                buttons.pack_start(self._start_button("Start with " + agent["label"],
+                                                      agent["note"], agent), False, False, 0)
+        else:
+            buttons.pack_start(self._start_button("Start my session", "", None), False, False, 0)
+        box.pack_start(buttons, False, False, 12)
+
+        self.welcome_error = label("", "hb-error", wrap=True)
+        box.pack_start(self.welcome_error, False, False, 0)
+        box.pack_start(label("Your project folder is ~/project. The agent opens there.",
+                             "hb-muted"), False, False, 20)
+        return box
+
+    def _start_button(self, text, note, agent):
+        btn = Gtk.Button()
+        btn.get_style_context().add_class("hb-start")
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        inner.pack_start(label(text), False, False, 0)
+        if note:
+            inner.pack_start(label(note, "hb-note"), False, False, 0)
+        btn.add(inner)
+        btn.connect("clicked", lambda *_: self.app.begin(agent))
+        self.start_buttons.append(btn)
+        return btn
+
+    def _build_ending(self):
+        box = self._column()
+        box.pack_start(label("Time is up. Thanks for hacking!", "hb-title"), False, False, 0)
+        self.code_intro = label("", "hb-body", wrap=True)
+        self.code_label = label("", "hb-code")
+        self.code_after = label("", "hb-body", wrap=True)
+        self.ending_countdown = label("", "hb-muted")
+        for w in (self.code_intro, self.code_label, self.code_after, self.ending_countdown):
+            box.pack_start(w, False, False, 8)
+        return box
+
+    def _build_resetting(self):
+        box = self._column()
+        box.pack_start(label("Resetting this machine for the next person…", "hb-title"),
+                       False, False, 0)
+        box.pack_start(label("This takes a few seconds.", "hb-body"), False, False, 12)
+        return box
+
+    def set_busy(self, busy, error=""):
+        for b in self.start_buttons:
+            b.set_sensitive(not busy)
+        self.welcome_error.set_text(error)
+
+    def show_face(self, face):
+        if face != self.face:
+            self.stack.set_visible_child_name(face)
+            self.face = face
+        if face == "ending":
+            self._update_ending()
+        geo = primary_geometry()
+        if not self.get_visible():
+            self.move(geo.x, geo.y)
+            self.resize(geo.width, geo.height)
+            self.show_all()
+            self.fullscreen()
+        # Keep the gate in front: taken back if the attendee switches away.
+        if not self.is_active():
+            self.set_keep_above(True)
+            self.present()
+
+    def _update_ending(self):
+        code = read_run("code")
+        hours = as_int(self.app.conf["ARCHIVE_HOURS"], 24)
+        if code:
+            self.code_intro.set_text("Your ~/project was saved. Your pickup code:")
+            self.code_label.set_text(code)
+            self.code_after.set_text(
+                "Show this code at the help desk within %d hours to get a copy.\n"
+                "Dependencies, build output and secret files such as .env are not kept." % hours)
+        else:
+            self.code_intro.set_text("There was nothing new in ~/project to save.")
+            self.code_label.set_text("")
+            self.code_after.set_text("")
+        until = read_run_int("ending-until")
+        if until:
+            left = max(0, until - int(time.time()))
+            self.ending_countdown.set_text("This machine is wiped in %d s." % left)
+        else:
+            self.ending_countdown.set_text("")
+
+
+class Pill(Gtk.Window):
+    """The countdown. A POPUP (override-redirect) window: no decorations, no
+    taskbar entry, stays above normal and full-screen windows."""
+
+    def __init__(self, app):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.app = app
+        self.at_top = True
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual is not None and screen.is_composited():
+            self.set_visual(visual)
+        self.get_style_context().add_class("hb-pill")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_border_width(4)
+        # Clicking the time moves the pill between the top and bottom edge,
+        # in case it covers something the attendee needs.
+        ev = Gtk.EventBox()
+        self.time_label = Gtk.Label(label="--:--")
+        ev.add(self.time_label)
+        ev.connect("button-press-event", self._toggle_edge)
+        ev.set_tooltip_text("Click to move")
+        end = Gtk.Button(label="End now")
+        end.get_style_context().add_class("hb-endbtn")
+        end.connect("clicked", self._confirm_end)
+        box.pack_start(ev, False, False, 0)
+        box.pack_start(end, False, False, 0)
+        self.add(box)
+        self.dialog = None
+
+    def _toggle_edge(self, *_):
+        self.at_top = not self.at_top
+        self._place()
+        return True
+
+    def _place(self):
+        geo = primary_geometry()
+        w, h = self.get_size()
+        margin = max(4, int(6 * scale_factor()))
+        # The bottom edge sits above Cinnamon's panel (about 40 px at scale 1).
+        y = geo.y + margin if self.at_top else geo.y + geo.height - h - int(48 * scale_factor())
+        self.move(geo.x + (geo.width - w) // 2, y)
+
+    def _confirm_end(self, *_):
+        if self.dialog is not None:
+            self.dialog.present()
+            return
+        d = Gtk.MessageDialog(message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.NONE,
+                              text="End your session now?")
+        d.format_secondary_text("Your ~/project is saved for pickup, then this machine is "
+                                "wiped for the next person. This cannot be undone.")
+        d.add_button("Keep going", Gtk.ResponseType.CANCEL)
+        d.add_button("End now", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.CANCEL)
+        d.set_keep_above(True)
+        d.set_position(Gtk.WindowPosition.CENTER)
+        self.dialog = d
+
+        def on_response(dialog, response):
+            dialog.destroy()
+            self.dialog = None
+            if response == Gtk.ResponseType.OK:
+                start_unit("hackbox-reset.service", lambda ok, msg: False)
+        d.connect("response", on_response)
+        d.show_all()
+        d.present()
+
+    def update(self, left):
+        self.time_label.set_text("%02d:%02d" % (left // 60, left % 60))
+        ctx = self.get_style_context()
+        crit, warn = left <= 60, 60 < left <= 300
+        for cls, on in (("crit", crit), ("warn", warn)):
+            if on and not ctx.has_class(cls):
+                ctx.add_class(cls)
+            elif not on and ctx.has_class(cls):
+                ctx.remove_class(cls)
+        if not self.get_visible():
+            self.show_all()
+        self._place()
+
+    def hide_all(self):
+        if self.dialog is not None:
+            self.dialog.destroy()
+            self.dialog = None
+        self.hide()
+
+
+class Toast(Gtk.Window):
+    """Large warning at 5:00 and 1:00 (popups from the notification daemon
+    are switched off on these boxes, so the overlay shows its own)."""
+
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.get_style_context().add_class("hb-toast")
+        ev = Gtk.EventBox()
+        self.text = Gtk.Label()
+        self.text.set_justify(Gtk.Justification.CENTER)
+        self.text.set_margin_top(18)
+        self.text.set_margin_bottom(18)
+        self.text.set_margin_start(36)
+        self.text.set_margin_end(36)
+        ev.add(self.text)
+        ev.connect("button-press-event", lambda *_: self.hide() or True)
+        self.add(ev)
+        self.timer = None
+
+    def flash(self, minutes):
+        ctx = self.get_style_context()
+        if minutes <= 1:
+            ctx.add_class("crit")
+            msg = "1 minute left.\nEverything on this machine is wiped at 00:00."
+        else:
+            ctx.remove_class("crit")
+            msg = ("%d minutes left.\nCommit and push your work now." % minutes)
+        self.text.set_text(msg)
+        self.show_all()
+        geo = primary_geometry()
+        w, h = self.get_size()
+        self.move(geo.x + (geo.width - w) // 2, geo.y + geo.height // 4)
+        if self.timer:
+            GLib.source_remove(self.timer)
+        self.timer = GLib.timeout_add_seconds(12, self._expire)
+
+    def _expire(self):
+        self.timer = None
+        self.hide()
+        return False
+
+
+# ------------------------------------------------------------------ app ---
+
+class Overlay:
+    def __init__(self):
+        self.conf = load_conf()
+        self.agents = load_agents()
+        self.provider = Gtk.CssProvider()
+        install_css(self.provider)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), self.provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Gdk.Screen.get_default().connect("monitors-changed", self._monitors_changed)
+        self.full = FullScreen(self)
+        self.pill = Pill(self)
+        self.toast = Toast()
+        self.last_state = None
+        self.we_started = False
+        self.pending_agent = None
+        self.start_deadline = 0
+        self.last_warn = read_run("warn")     # do not replay an old warning
+
+    def _monitors_changed(self, *_):
+        install_css(self.provider)
+        if self.full.get_visible():
+            geo = primary_geometry()
+            self.full.move(geo.x, geo.y)
+            self.full.resize(geo.width, geo.height)
+
+    def begin(self, agent):
+        """Start button: ask systemd for the timer, then open the terminal."""
+        self.full.set_busy(True, "")
+        self.we_started = True
+        self.pending_agent = agent
+        self.start_deadline = time.time() + 15
+
+        def done(ok, msg):
+            if not ok:
+                self.we_started = False
+                self.pending_agent = None
+                self.full.set_busy(False, "Could not start the session (%s). "
+                                          "Please ask a staff member." % (msg or "no reason given"))
+            return False
+        start_unit("hackbox-session.service", done)
+
+    def tick(self):
+        state = read_run("state") or "idle"
+        if state == "active":
+            end = read_run_int("session-end")
+            if end is None:
+                return True
+            if self.last_state != "active":
+                self.full.hide()
+                self.full.set_busy(False, "")
+                # Our button: open the chosen agent. Staff `hackbox start`:
+                # a plain terminal, so the attendee is not left guessing.
+                if self.we_started or self.last_state == "idle":
+                    open_terminal(self.pending_agent)
+                self.we_started = False
+                self.pending_agent = None
+            self.pill.update(max(0, end - int(time.time())))
+            self._check_warning()
+        elif state in ("ending", "resetting"):
+            self.pill.hide_all()
+            self.toast.hide()
+            self.full.show_face("ending" if state == "ending" else "resetting")
+        else:
+            self.pill.hide_all()
+            self.toast.hide()
+            if self.we_started and time.time() > self.start_deadline:
+                self.we_started = False
+                self.pending_agent = None
+                self.full.set_busy(False, "The session did not start. Please ask a staff member.")
+            self.full.show_face("welcome")
+        self.last_state = state
+        return True
+
+    def _check_warning(self):
+        warn = read_run("warn")
+        if not warn or warn == self.last_warn:
+            return
+        self.last_warn = warn
+        parts = warn.split()
+        minutes = as_int(parts[0], None) if parts else None
+        stamp = as_int(parts[1], 0) if len(parts) > 1 else 0
+        if minutes is not None and time.time() - stamp < 60:
+            self.toast.flash(minutes)
+
+
+def single_instance():
+    """One overlay per session. The lock dies with the process."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    path = os.path.join(runtime, "hackbox-overlay.lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except OSError:
+        return None
+
+
+def main():
+    lock = single_instance()
+    if lock is None:
+        return 0
+    if Gdk.Display.get_default() is None:
+        Gtk.init_check(sys.argv)
+    if Gdk.Display.get_default() is None:
+        print("hackbox-overlay: no display", file=sys.stderr)
+        return 1
+    apply_terminal_profile()
+    app = Overlay()
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, Gtk.main_quit)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, Gtk.main_quit)
+    app.tick()
+    GLib.timeout_add(500, app.tick)
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

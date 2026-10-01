@@ -1,0 +1,16 @@
+# hack-box: overlay relaunch and session watchdog. Installed by
+# setup/70-session.sh. KillMode=process so a restart of the guard does not
+# take a fallback-launched overlay down with it.
+[Unit]
+Description=hack-box session guard
+After=hackbox-home.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/hackbox-guard
+Restart=always
+RestartSec=3
+KillMode=process
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=hack-box overlay
+Comment=Welcome screen and session countdown
+Exec=/usr/local/lib/hackbox/hackbox-overlay
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Phase=Applications
