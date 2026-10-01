@@ -160,3 +160,41 @@ encrypting archives at rest.
 - ssh: a dedicated, passphrase-less key `~/.ssh/hackbox_ed25519` on the build machine (in
   `SSH_KEY_FILES`) and `~/.ssh/config` entries for `hackbox1..4` (user `hackadmin`, the
   Tailscale names), so non-interactive ssh always works.
+
+## Round 3 (approved 2026-10-01): one stick for the fleet, activity, tailnet lockdown, 0G skills
+
+### Automatic numbering
+
+- The stick carries `HUB_URL` and a fleet `HUB_ENROLL_TOKEN` instead of a per-box token, and no
+  fixed hostname (the box installs as `hackbox-{mac4}`).
+- First boot, right after `05-tailscale.sh`: `POST /api/v1/enroll` (Bearer enroll token)
+  `{"mac","current_hostname"}` gives `{"name","token"}`. The box sets its hostname
+  (`hostnamectl`, `/etc/hosts`), renames itself on the tailnet (`tailscale set --hostname`) and
+  writes `hub.conf` with its own token. The rest of provisioning runs under the new name.
+- Hub rule: the same MAC always gets the same name back (a reinstall keeps its number, with a
+  new token). A new MAC gets the lowest free `<prefix>N` (prefix `hackbox`); a name is taken
+  when it is bound to a MAC or has ever sent a heartbeat. The dashboard can release a name
+  (for a dead box), which revokes its enrolled token.
+- Enroll tokens and enrolled box tokens live in the hub (config `enroll_token`, a table for
+  enrolled tokens); `--host` sticks with fixed tokens keep working.
+
+### Activity on the dashboard
+
+- Heartbeat body gains `"activity": ["Terminal", "OpenCode", ...]`: friendly names of the
+  programs the attendee uid runs, from an allow list (terminal, opencode, claude, chromium,
+  files, editor, node, python, ...). No window titles, URLs or screenshots. Shown on the box
+  card, kept only as the current value. The welcome screen says staff can see which apps
+  are open.
+
+### Tailnet lockdown
+
+- Boxes join with a tagged, pre-approved auth key (`tag:hackbox`); the tailnet policy lets
+  `tag:hackbox` reach only the hub port on jarvis. The hub refuses `/` and `/dash/*` from any
+  address that has made an authenticated box API call (the dashboard shares the hub's port).
+
+### 0G agent skills
+
+- Provisioning clones `github.com/0gfoundation/0g-agent-skills` (depth 1) to
+  `/opt/0g-agent-skills`, root owned, world readable. Every fresh home gets
+  `~/.claude/CLAUDE.md` and `~/.config/opencode/AGENTS.md` that point at it. `hackbox skills
+  update` refreshes the clone.
