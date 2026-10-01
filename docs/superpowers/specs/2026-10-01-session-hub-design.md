@@ -129,3 +129,34 @@ minutes). The download never waits for GitHub.
 
 Cloudflare Access (tonight, by the owner), per-attendee GitHub access, email delivery,
 encrypting archives at rest.
+
+## Round 2 (approved 2026-10-01): agent keys from the dashboard, one-file build
+
+### Agent keys and agent choice from the dashboard
+
+- Dashboard panel "Agent keys": `anthropic-api-key` and `0g-router-key`, and the offered agents
+  (`claude`, `claude-0g`, `opencode`), for scope `*` (all boxes, the default) or one box (an
+  override). Write-only: the page shows "set, updated <time>" and never a value. Clearing a
+  value at box scope falls back to the default.
+- Hub: `config` rows `(scope, name, value, updated_at)`; the effective config of a box is the
+  box row, else the `*` row, per name. `config_version` = a hash of the effective config.
+- Heartbeat reply gains `"config_version"`. `GET /api/v1/config` (box auth) returns
+  `{"version","secrets":{"anthropic-api-key":...,"0g-router-key":...},"agents":[...]}` with
+  only the names that are set.
+- Box agent: when the version differs from the last applied one and the box is **idle**, it
+  fetches the config, writes each secret with `hackbox secret set <name>` (value on stdin),
+  runs `hackbox agents set <agents...>` when given, then `hackbox reset` so the welcome screen
+  shows it. Never during a session. A name the hub does not have is left alone on the box.
+- Per-box keys with spending caps are recommended (an attendee can read the key on their box).
+
+### One `.env` for the whole build
+
+- `.env` at the repo root (git-ignored), `.env.example` committed. It is a shell file with the
+  `headless.conf` keys plus `HUB_URL` and `HUB_TOKEN_<hostname>` per box.
+- `make-usb-iso.sh --config .env --host hackbox2` builds the stick for one box (the hostname
+  overrides `HB_HOSTNAME`). With `HUB_URL` and that box's token, the stick carries
+  `hub.conf`; the first boot runs `hackbox hub set` after the session engine is installed.
+- Agent keys are not put on the stick; they come from the dashboard.
+- ssh: a dedicated, passphrase-less key `~/.ssh/hackbox_ed25519` on the build machine (in
+  `SSH_KEY_FILES`) and `~/.ssh/config` entries for `hackbox1..4` (user `hackadmin`, the
+  Tailscale names), so non-interactive ssh always works.
