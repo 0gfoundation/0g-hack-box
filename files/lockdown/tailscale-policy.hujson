@@ -1,0 +1,46 @@
+// Tailnet policy for the hack-box fleet on the owner's tailnet (2026-10-01).
+// Paste the whole file at https://login.tailscale.com/admin/acls/file (Access controls,
+// JSON editor) in place of the default "allow everything" policy, then Save.
+//
+// Boxes join with a pre-approved auth key tagged tag:hackbox (.env TS_AUTHKEY, TS_TAG). A box
+// may reach only the session hub's port on jarvis; nothing else on the tailnet, so a box
+// that is fully taken over cannot touch jarvis's other services, forge or the servers.
+// The hub itself refuses its dashboard to box addresses (the dashboard shares the port).
+// The attendee account on a box cannot reach the tailnet at all (the box's nft rules).
+//
+// files/lockdown/tailscale-acl.hujson is the general version for an event tailnet with a
+// group:organisers; this file is the concrete one for a personal tailnet.
+{
+  "tagOwners": {
+    "tag:hackbox": ["autogroup:admin"],
+  },
+  "hosts": {
+    // jarvis, where the hub runs (hub/, port 8210).
+    "jarvis-hub": "100.113.49.48",
+  },
+  "grants": [
+    // The owner's own devices: everything, as before (this replaces the default "*" rule,
+    // which would also let the boxes reach every device).
+    {"src": ["autogroup:member"], "dst": ["*"], "ip": ["*"]},
+    // Boxes: only the hub.
+    {"src": ["tag:hackbox"], "dst": ["jarvis-hub"], "ip": ["tcp:8210"]},
+  ],
+  // Tailscale SSH: the default rule, unchanged.
+  "ssh": [
+    {
+      "action": "check",
+      "src":    ["autogroup:member"],
+      "dst":    ["autogroup:self"],
+      "users":  ["autogroup:nonroot", "root"],
+    },
+  ],
+  // Tailscale refuses to save the policy unless these hold.
+  "tests": [
+    {
+      "src":    "tag:hackbox",
+      "accept": ["jarvis-hub:8210"],
+      // jarvis ssh, forge's LLM API, a server's ssh
+      "deny":   ["jarvis-hub:22", "100.105.61.91:11434", "100.110.216.57:22"],
+    },
+  ],
+}
