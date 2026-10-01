@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Reset hook (/etc/hackbox/reset.d/50-ai-seed), run as root after the fresh home is
+# populated, with HB_HOME exported. Seeds the per-user state the agents would otherwise
+# ask for on first launch:
+#   ~/.claude.json           onboarding done, ~/project trusted (so no trust dialog)
+#   ~/.claude/settings.json  dark theme (no theme picker)
+#   ~/.config/opencode/      created empty; OpenCode needs nothing else (config is managed)
+#   ~/.config/hackbox/env    when opencode or claude-0g is offered: ZG_ROUTER_API_KEY,
+#                            OG_ROUTER_URL and OG_MODEL for the attendee's own code (the
+#                            starter kit's compute example reads them), sourced by a guarded
+#                            line appended to ~/.bashrc and ~/.profile (SPEC amendment A2).
+#                            The key is the same per-box, credit-limited key OpenCode already
+#                            reads; putting it in the environment adds no new exposure.
+# Never fails the reset: every problem is logged and the hook exits 0.
+set -uo pipefail
+
+log() { logger -t hackbox-ai-seed -- "$*" 2>/dev/null || echo "hackbox-ai-seed: $*" >&2; }
+trap 'log "error on line $LINENO, continuing"' ERR
+
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+home=${HB_HOME:-/home/${HACKER_USER:-hacker}}
+uid=${HACKER_UID:-2000}
+if [ ! -d "$home" ]; then
+  log "home $home missing, nothing seeded"
+  exit 0
+fi
+# HB_SEED_OWNER lets a dry run off the box skip chown.
+owner=${HB_SEED_OWNER:-$uid:$uid}
+
+python3 - "$home" <<'PY' || log "could not write .claude.json"
+import json, os, sys
+home = sys.argv[1]
+path = os.path.join(home, ".claude.json")
+data = {}
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+        if not isinstance(data, dict):
+            data = {}
+except (OSError, ValueError):
+    pass
+data["hasCompletedOnboarding"] = True
+projects = data.setdefault("projects", {})
+for d in (os.path.join(home, "project"),):
+    entry = projects.setdefault(d, {})
+    entry["hasTrustDialogAccepted"] = True
+    entry.setdefault("allowedTools", [])
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+
+sdir = os.path.join(home, ".claude")
+os.makedirs(sdir, exist_ok=True)
+spath = os.path.join(sdir, "settings.json")
+settings = {}
+try:
+    with open(spath) as fh:
+        settings = json.load(fh)
+        if not isinstance(settings, dict):
+            settings = {}
+except (OSError, ValueError):
+    pass
+settings.setdefault("theme", "dark")
+with open(spath, "w") as fh:
+    json.dump(settings, fh, indent=2)
+    fh.write("\n")
+PY
+
+mkdir -p "$home/.config/opencode" "$home/.config/hackbox"
+
+# Router environment for the attendee's own code (A2).
+envf="$home/.config/hackbox/env"
+selected=$(cat /etc/hackbox/agents.selected 2>/dev/null || true)
+router=${OG_ROUTER_URL:-https://router-api.0g.ai}
+router=${router%/}; router=${router%/v1}
+case " $selected " in
+  *" opencode "*|*" claude-0g "*)
+    # Braces: a missing file is reported by the redirection itself, before a
+    # 2>/dev/null on the command would apply.
+    key=$({ tr -d ' \t\r\n' < /etc/hackbox/secrets/0g-router-key; } 2>/dev/null || true)
+    {
+      echo "# hack-box: 0G Compute Router access for your own code. Wiped after your slot."
+      [ -n "$key" ] && printf 'export ZG_ROUTER_API_KEY=%q\n' "$key"
+      printf 'export OG_ROUTER_URL=%q\n' "$router"
+      printf 'export OG_MODEL=%q\n' "${OG_MODEL:-glm-5.3}"
+    } > "$envf"
+    chmod 0600 "$envf"
+    ;;
+  *) rm -f "$envf" ;;
+esac
+line='if [ -r "$HOME/.config/hackbox/env" ]; then . "$HOME/.config/hackbox/env"; fi  # hack-box agent env'
+for rc in "$home/.bashrc" "$home/.profile"; do
+  if ! grep -qF '.config/hackbox/env' "$rc" 2>/dev/null; then
+    printf '\n%s\n' "$line" >> "$rc"
+  fi
+done
+
+if [ "$owner" != skip ]; then
+  chown "$owner" "$home/.claude.json" "$home/.bashrc" "$home/.profile" 2>/dev/null
+  chown -R "$owner" "$home/.claude" "$home/.config/opencode" "$home/.config/hackbox" 2>/dev/null
+  chown "$owner" "$home/.config" 2>/dev/null
+fi
+log "seeded agent state in $home"
+exit 0

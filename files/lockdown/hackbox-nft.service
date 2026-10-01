@@ -1,0 +1,19 @@
+# hack-box attendee firewall: loads table inet hackbox from /etc/hackbox/hackbox.nft.
+# A separate unit on purpose: nftables.service loads /etc/nftables.conf, whose stock first
+# line is `flush ruleset`, which would wipe Tailscale's tables. Leave nftables.service off.
+[Unit]
+Description=hack-box attendee egress filter (table inet hackbox)
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/hackbox/hackbox.nft
+ExecReload=/usr/sbin/nft -f /etc/hackbox/hackbox.nft
+ExecStop=-/usr/sbin/nft delete table inet hackbox
+
+[Install]
+WantedBy=sysinit.target

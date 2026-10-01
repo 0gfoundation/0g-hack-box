@@ -1,0 +1,18 @@
+#!/bin/sh
+# apiKeyHelper for Claude Code (named in /etc/claude-code/managed-settings.json).
+# Prints one key from /etc/hackbox/secrets/ on stdout; Claude Code sends it as both
+# x-api-key and Authorization: Bearer, and caches it for five minutes.
+# Residual exposure, by design: this runs as the attendee, so the attendee can run it too
+# and read the key. Keys are per box and capped server side (Console workspace limit,
+# gateway budget, 0G Router credit_limit); treat them as visible to whoever sits here.
+case "${1:-}" in
+  anthropic-api-key|claude-gateway-token|0g-router-key) ;;
+  *) echo "hackbox: unknown key name '${1:-}'" >&2; exit 2 ;;
+esac
+f="/etc/hackbox/secrets/$1"
+if [ -r "$f" ] && [ -s "$f" ]; then
+  tr -d ' \t\r\n' < "$f"
+  exit 0
+fi
+echo "hackbox: this station has no $1 yet. Please ask a staff member." >&2
+exit 1

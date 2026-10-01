@@ -1,0 +1,18 @@
+// hack-box: tailnet policy fragment. Merge into the tailnet policy file by hand (admin
+// console, Access controls). Kiosks join with TS_TAG=tag:hackbox (setup/05-tailscale.sh),
+// ideally with a tagged, reusable, pre-approved auth key.
+//
+// Effect: organisers can ssh to the kiosks; the kiosks can open no connection to any
+// tailnet peer, even as root. This is the server-side wall behind the on-box nftables
+// rules, and it also covers `tailscale nc` style requests that tailscaled makes as root
+// on the attendee's behalf through the LocalAPI socket.
+{
+  "tagOwners": {
+    "tag:hackbox": ["group:organisers"]
+  },
+  "grants": [
+    // organisers may ssh into kiosks
+    { "src": ["group:organisers"], "dst": ["tag:hackbox"], "ip": ["tcp:22"] }
+    // intentionally no grant with src tag:hackbox: kiosks reach nothing on the tailnet
+  ]
+}
