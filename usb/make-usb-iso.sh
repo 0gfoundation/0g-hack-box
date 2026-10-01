@@ -189,11 +189,46 @@ out = "\n".join(lines[:idx]) + "\n" + head + entries + "\n" + "\n".join(lines[id
 open(dst, "w").write(out)
 PY
 
+# Legacy BIOS (CSM) boots isolinux, not GRUB, and so would never see the entries above: the
+# stock menu starts a plain live session after 10 s. Say so instead and wait (no timeout).
+cat > "$W/live.cfg" <<EOF
+timeout 0
+menu background splash.png
+menu title hack-box: LEGACY BIOS boot. This stick installs only in UEFI mode.
+MENU COLOR title        1;36;44 #ffffffff #a0000000 std
+MENU COLOR sel          7;37;40 #e0ffffff #20ffffff all
+MENU COLOR unsel        37;44   #50ffffff #a0000000 std
+MENU COLOR disabled     37;44   #c0ffffff #a0000000 std
+MENU WIDTH 78
+MENU MARGIN 4
+MENU ROWS 8
+MENU VSHIFT 6
+
+label why1
+	menu label Nothing was installed or erased. To install:
+	menu disable
+label why2
+	menu label   power off, press F7 (or F11, F12, Esc) at power on and pick
+	menu disable
+label why3
+	menu label   the stick's entry that starts with "UEFI:". No such entry?
+	menu disable
+label why4
+	menu label   In firmware setup (Del) set the boot mode to UEFI (CSM off).
+	menu disable
+label live
+	menu label Start a Linux Mint live session (installs nothing)
+	menu default
+	kernel /casper/vmlinuz
+	append boot=casper initrd=/casper/initrd.lz uuid=$UUID username=mint hostname=mint quiet splash --
+EOF
+
 rm -f "$OUT"
 # A headless ISO holds secrets: create it 0600.
 ( [ $HEADLESS = 1 ] && umask 077
   xorriso -indev "$SRC" -outdev "$OUT" -boot_image any replay \
     -map "$W/grub.cfg" /boot/grub/grub.cfg \
+    -map "$W/live.cfg" /isolinux/live.cfg \
     -map "$W/initrd-hackbox.lz" /casper/initrd-hackbox.lz \
     -map "$SEED" /preseed/hackbox \
     "${MAPS[@]}" \

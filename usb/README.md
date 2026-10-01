@@ -215,6 +215,13 @@ real AMI firmware.
 - **The box reinstalls itself in a loop.** Should not happen (two independent guards, both proven
   in the lab). If it does, pull the stick; the disk boots on its own.
 - **The box is on the network as Windows.** See the section above; you need a screen once.
+- **`mint.local` answers instead of `hackbox1.local`, or a menu says "LEGACY BIOS boot".** The
+  firmware booted the stick in legacy (CSM) mode: the boot menu entry was just the stick's name
+  or "USB", without "UEFI:". The automated entries exist only in the UEFI menu, so nothing is
+  installed. Power off, pick the "UEFI:" entry, or set the boot mode to UEFI (CSM off) in setup.
+- **Wi-Fi from an iPhone hotspot never connects.** iOS names the hotspot after the phone and
+  writes the apostrophe as `’` (U+2019), not `'`. Copy the SSID exactly, for example from the
+  Mac's `ipconfig getsummary en0` while it is joined to the hotspot.
 - **Nothing at all, no lights.** Power supply, or the box is set to stay off after power loss;
   press the power button.
 
