@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS config (
 var migrations = []string{
 	`ALTER TABLE boxes ADD COLUMN applied_config_version TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE boxes ADD COLUMN activity_json TEXT NOT NULL DEFAULT '[]'`,
+	`ALTER TABLE sessions ADD COLUMN email TEXT NOT NULL DEFAULT ''`,
 }
 
 func openDB(dataDir string) (*sql.DB, error) {
@@ -156,11 +157,12 @@ type Session struct {
 	GitHubError     string
 	GitHubNextAt    int64
 	CreatedAt       int64
+	Email           string // attendee email, staff only; never on the public page
 }
 
 const sessionCols = `id, box, name, agent, minutes, started_at, ended_at, end_reason,
  extended_minutes, token, code, local_code, expires_at, archive_path, archive_bytes, empty,
- github_repo, github_status, github_error, github_next_at, created_at`
+ github_repo, github_status, github_error, github_next_at, created_at, email`
 
 type scanner interface{ Scan(...any) error }
 
@@ -170,7 +172,7 @@ func scanSession(sc scanner) (*Session, error) {
 	err := sc.Scan(&s.ID, &s.Box, &s.Name, &s.Agent, &s.Minutes, &s.StartedAt, &s.EndedAt,
 		&s.EndReason, &s.ExtendedMinutes, &s.Token, &s.Code, &s.LocalCode, &s.ExpiresAt,
 		&s.ArchivePath, &s.ArchiveBytes, &empty, &s.GitHubRepo, &s.GitHubStatus,
-		&s.GitHubError, &s.GitHubNextAt, &s.CreatedAt)
+		&s.GitHubError, &s.GitHubNextAt, &s.CreatedAt, &s.Email)
 	if err != nil {
 		return nil, err
 	}

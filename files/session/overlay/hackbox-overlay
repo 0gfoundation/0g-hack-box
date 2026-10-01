@@ -22,6 +22,7 @@ Python 3 and GTK 3 through gi only (both ship with Mint Cinnamon). No GL.
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -133,7 +134,7 @@ def start_unit(unit, done):
     threading.Thread(target=work, daemon=True).start()
 
 
-def save_attendee(name, agent_id):
+def save_attendee(name, agent_id, email=""):
     """Name and agent for the hub agent, which reads this file as root with
     care (no symlinks, small, owned by the attendee). The home is wiped at
     every reset, so it cannot leak into the next session."""
@@ -142,7 +143,7 @@ def save_attendee(name, agent_id):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            f.write(name[:40] + "\n" + agent_id[:30] + "\n")
+            f.write(name[:40] + "\n" + agent_id[:30] + "\n" + email[:120] + "\n")
         os.replace(tmp, path)
     except OSError:
         pass
@@ -329,7 +330,7 @@ class FullScreen(Gtk.Window):
         box.pack_start(rules, False, False, 24)
 
         # With a hub: the name goes into the session history and the download page.
-        self.name_entry = None
+        self.name_entry = self.email_entry = None
         if self.app.hub:
             self.name_entry = Gtk.Entry()
             self.name_entry.set_placeholder_text("Your name")
@@ -339,9 +340,23 @@ class FullScreen(Gtk.Window):
             self.name_entry.set_halign(Gtk.Align.CENTER)
             self.name_entry.get_style_context().add_class("hb-name")
             self.name_entry.connect("changed", lambda *_: self._name_changed())
-            # A focused entry hides its placeholder, so say it above as well.
-            box.pack_start(label("Your name", "hb-body"), False, False, 0)
-            box.pack_start(self.name_entry, False, False, 4)
+            self.email_entry = Gtk.Entry()
+            self.email_entry.set_placeholder_text("you@example.com")
+            self.email_entry.set_max_length(120)
+            self.email_entry.set_alignment(0.5)
+            self.email_entry.set_width_chars(32)
+            self.email_entry.set_input_purpose(Gtk.InputPurpose.EMAIL)
+            self.email_entry.get_style_context().add_class("hb-name")
+            self.email_entry.connect("changed", lambda *_: self._name_changed())
+            self.email_entry.connect("activate", lambda *_: None)
+            # A focused entry hides its placeholder, so label both above the fields.
+            fields = Gtk.Grid(column_spacing=24, row_spacing=6)
+            fields.set_halign(Gtk.Align.CENTER)
+            fields.attach(label("Your name", "hb-body"), 0, 0, 1, 1)
+            fields.attach(label("Your email", "hb-body"), 1, 0, 1, 1)
+            fields.attach(self.name_entry, 0, 1, 1, 1)
+            fields.attach(self.email_entry, 1, 1, 1, 1)
+            box.pack_start(fields, False, False, 4)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=28)
         buttons.set_halign(Gtk.Align.CENTER)
@@ -373,9 +388,16 @@ class FullScreen(Gtk.Window):
             return ""
         return " ".join(self.name_entry.get_text().split())
 
+    def attendee_email(self):
+        if self.email_entry is None:
+            return ""
+        return self.email_entry.get_text().strip()
+
     def _name_changed(self):
-        """Start stays disabled until a name of 2 or more characters is typed."""
-        ok = self.name_entry is None or len(self.attendee_name()) >= 2
+        """Start stays disabled until a name (2+ characters) and an email are typed."""
+        ok = self.name_entry is None or (
+            len(self.attendee_name()) >= 2 and
+            re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", self.attendee_email()) is not None)
         for b in self.start_buttons:
             b.set_sensitive(ok and not self.busy)
 
@@ -474,10 +496,13 @@ class FullScreen(Gtk.Window):
             self.url_label.hide()
             self._local_code()
         until = read_run_int("ending-until")
-        if until:
+        if self.app.hub:
+            # No countdown with a hub: the screen waits for Done (or staff, from the dashboard).
+            self.ending_countdown.set_text("Press Done when you have your project. "
+                                           "This machine is wiped for the next person after that.")
+        elif until:
             left = max(0, until - int(time.time()))
-            self.ending_countdown.set_text(("Press Done when you have it. " if self.app.hub else "")
-                                           + "This machine is wiped in %d s." % left)
+            self.ending_countdown.set_text("This machine is wiped in %d s." % left)
         else:
             self.ending_countdown.set_text("")
 
@@ -719,7 +744,8 @@ class Overlay:
         """Start button: ask systemd for the timer, then open the terminal."""
         self.full.set_busy(True, "")
         if self.hub:
-            save_attendee(self.full.attendee_name(), agent["id"] if agent else "")
+            save_attendee(self.full.attendee_name(), agent["id"] if agent else "",
+                          self.full.attendee_email())
         self.we_started = True
         self.pending_agent = agent
         self.start_deadline = time.time() + 15

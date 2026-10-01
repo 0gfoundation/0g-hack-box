@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -66,6 +67,9 @@ type createSessionReq struct {
 	Minutes   int    `json:"minutes"`
 	StartedAt int64  `json:"started_at"`
 	LocalCode string `json:"local_code"`
+	// Email is optional. An invalid one is stored as "" and never fails the start.
+	// It is decoded loosely: a number or object is ignored, not a 400.
+	Email any `json:"email"`
 }
 
 type createSessionResp struct {
@@ -119,9 +123,9 @@ func (s *Server) apiCreateSession(w http.ResponseWriter, r *http.Request, box st
 	token := randomToken()
 	ghStatus := "disabled"
 	_, err := s.db.Exec(`INSERT INTO sessions (id, box, name, agent, minutes, started_at, token, code,
-		local_code, expires_at, github_status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		local_code, expires_at, github_status, created_at, email) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, box, cleanText(req.Name, 80), cleanText(req.Agent, 40), req.Minutes, req.StartedAt,
-		token, code, cleanText(req.LocalCode, 16), expires, ghStatus, now)
+		token, code, cleanText(req.LocalCode, 16), expires, ghStatus, now, cleanEmail(asString(req.Email)))
 	if err != nil {
 		s.serverError(w, err)
 		return
@@ -129,6 +133,28 @@ func (s *Server) apiCreateSession(w http.ResponseWriter, r *http.Request, box st
 	s.db.Exec(`INSERT INTO boxes (name, session_id) VALUES (?, ?)
 		ON CONFLICT(name) DO UPDATE SET session_id = excluded.session_id`, box, id)
 	writeJSON(w, http.StatusOK, createSessionResp{ID: id, Token: token, Code: code, URL: s.downloadURL(token), ExpiresAt: expires})
+}
+
+// emailRe is a loose shape check: local@domain.tld, no spaces or control
+// characters. It is not a deliverability check.
+var emailRe = regexp.MustCompile(`^[^\s@<>"'\x00-\x1f\x7f]+@[^\s@<>"'\x00-\x1f\x7f]+\.[A-Za-z]{2,}$`)
+
+// cleanEmail returns the trimmed email, or "" when it does not look like one.
+func cleanEmail(e string) string {
+	e = strings.TrimSpace(e)
+	if len(e) > 120 || !emailRe.MatchString(e) {
+		return ""
+	}
+	dom := e[strings.LastIndex(e, "@")+1:]
+	if strings.HasPrefix(dom, ".") || strings.Contains(dom, "..") {
+		return ""
+	}
+	return e
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 // ownedSession loads {id} and checks it belongs to the calling box.

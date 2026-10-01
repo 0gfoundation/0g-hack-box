@@ -22,8 +22,9 @@ case "${1:-}" in
       echo "usage: hackbox hub set <http(s)://host:port> <box-token>" >&2; exit 2; }
     printf "HUB_URL='%s'\nHUB_TOKEN='%s'\n" "$url" "$token" |
       sudo install -m 0600 -o root -g root /dev/stdin "$CONF"
-    # 3 minutes on the time-up screen (Done ends it sooner), name on the welcome screen.
-    printf 'HUB_ENABLED=1\nEND_GRACE_SECONDS=180\n' |
+    # The time-up screen waits for Done (attendee or staff); 30 minutes is only a safety net
+    # for a box nobody looks after. Name and email on the welcome screen.
+    printf 'HUB_ENABLED=1\nEND_GRACE_SECONDS=1800\n' |
       sudo install -m 0644 -o root -g root /dev/stdin "$LOCAL"
     sudo systemctl enable --now hackbox-hubagent.service >/dev/null
     sudo systemctl restart hackbox-hubagent.service

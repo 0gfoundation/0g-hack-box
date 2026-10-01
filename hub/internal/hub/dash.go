@@ -48,6 +48,7 @@ type dashBox struct {
 	SecondsLeft     int64        `json:"seconds_left"`
 	SessionID       string       `json:"session_id"`
 	Attendee        string       `json:"attendee"`
+	Email           string       `json:"email"`
 	Agent           string       `json:"agent"`
 	StartedAt       int64        `json:"started_at"`
 	Minutes         int          `json:"minutes"`
@@ -75,6 +76,7 @@ type dashSession struct {
 	Agent           string `json:"agent"`
 	Code            string `json:"code"`
 	LocalCode       string `json:"local_code"`
+	Email           string `json:"email"`
 	Minutes         int    `json:"minutes"`
 	ExtendedMinutes int    `json:"extended_minutes"`
 	StartedAt       int64  `json:"started_at"`
@@ -154,7 +156,7 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 		b.ConfigUpToDate = b.ConfigVersion == b.AppliedConfigVersion
 		if b.SessionID != "" {
 			if ss, err := s.sessionBy("id", b.SessionID); err == nil {
-				b.Attendee, b.Agent, b.StartedAt = ss.Name, ss.Agent, ss.StartedAt
+				b.Attendee, b.Email, b.Agent, b.StartedAt = ss.Name, ss.Email, ss.Agent, ss.StartedAt
 				b.Minutes, b.ExtendedMinutes, b.Code = ss.Minutes, ss.ExtendedMinutes, ss.Code
 			}
 			var q dashRequest
@@ -176,7 +178,7 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, ss := range list {
 		d := dashSession{
-			ID: ss.ID, Box: ss.Box, Name: ss.Name, Agent: ss.Agent, Code: ss.Code, LocalCode: ss.LocalCode,
+			ID: ss.ID, Box: ss.Box, Name: ss.Name, Agent: ss.Agent, Code: ss.Code, LocalCode: ss.LocalCode, Email: ss.Email,
 			Minutes: ss.Minutes, ExtendedMinutes: ss.ExtendedMinutes, StartedAt: ss.StartedAt,
 			EndedAt: ss.EndedAt, EndReason: ss.EndReason, ArchiveBytes: ss.ArchiveBytes, Empty: ss.Empty,
 			GitHubStatus: ss.GitHubStatus, GitHubRepo: ss.GitHubRepo, GitHubError: ss.GitHubError,
@@ -272,6 +274,31 @@ func (s *Server) dashEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := s.queueCommand(box, "end", 0)
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"command_id": strconv.FormatInt(id, 10)})
+}
+
+// dashFinish ends the time-up screen early (the attendee's "Done"). It only
+// makes sense while the box shows that screen, so anything but "ending" is 409.
+func (s *Server) dashFinish(w http.ResponseWriter, r *http.Request) {
+	box := r.PathValue("box")
+	if !s.knownBox(box) {
+		jsonError(w, http.StatusNotFound, "unknown box")
+		return
+	}
+	var state string
+	s.db.QueryRow(`SELECT state FROM boxes WHERE name = ?`, box).Scan(&state)
+	if state != "ending" {
+		if state == "" {
+			state = "unknown"
+		}
+		jsonError(w, http.StatusConflict, box+" is not on the time-up screen (state "+state+")")
+		return
+	}
+	id, err := s.queueCommand(box, "done", 0)
 	if err != nil {
 		s.serverError(w, err)
 		return

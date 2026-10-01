@@ -53,7 +53,7 @@ AGENT_PID=$!
 sleep 1
 
 # --- session starts ---
-printf 'Ada  Lovelace\x07\nclaude\n' > "$T/home/attendee"
+printf 'Ada  Lovelace\x07\nclaude\nada@example.com\n' > "$T/home/attendee"
 echo $(( $(date +%s) + 1800 )) > "$RUN/session-end"
 echo active > "$RUN/state"
 check "agent registers the session and writes hub-url" wait_for "[ -s $RUN/hub-url ]"
@@ -65,6 +65,8 @@ STATE=http://127.0.0.1:$PORT/dash/state
 check "dashboard shows the box active with the name" \
   wait_for "curl -fs $STATE | python3 -c 'import json,sys; b=[x for x in json.load(sys.stdin)[\"boxes\"] if x.get(\"name\")==\"hackbox9\"]; sys.exit(0 if b and b[0].get(\"state\")==\"active\" else 1)'"
 check "dashboard JSON has the attendee name" bash -c "curl -fs $STATE | grep -q 'Ada Lovelace'"
+check "dashboard has the attendee email" bash -c "curl -fs $STATE | grep -q 'ada@example.com'"
+check "download page does not show the email" bash -c "! curl -fs '$URL' | grep -q 'ada@example.com'"
 
 # --- extend request, approval ---
 date +%s > "$RUN/extend-request"; echo pending > "$RUN/extend-status"
@@ -85,7 +87,9 @@ curl -fs -X POST -H 'Content-Type: application/json' -d '{"minutes":5}' \
 check "staff +5 runs 'hackbox extend 5'" wait_for "grep -qx 'extend 5' $T/commands.log"
 
 # --- end, archive, upload ---
-echo ending > "$RUN/state"; echo ABCDEF > "$RUN/code"; sleep 1
+echo ending > "$RUN/state"; echo ABCDEF > "$RUN/code"; sleep 1.5
+curl -fs -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/dash/boxes/hackbox9/finish" >/dev/null
+check "staff Finish sets the Done flag on the box" wait_for "[ -e $RUN/ending-done ]"
 mkdir -p "$T/proj/project/src"; echo 'console.log("hi")' > "$T/proj/project/src/index.js"
 tar -C "$T/proj" -czf "$T/archive/ABCDEF.tar.gz" project
 echo resetting > "$RUN/state"; sleep 0.6

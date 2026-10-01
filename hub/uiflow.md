@@ -10,10 +10,13 @@ Screens on the box are drawn by the overlay. Pages on a phone or laptop are serv
 
 ### 1. Welcome screen (box)
 
-1. The attendee types a first name (optional) and presses an agent button.
+1. The attendee types a first name (optional), optionally an email, and presses an agent
+   button.
 2. The overlay writes the name to `~/.cache/hackbox/attendee-name` and starts the session.
 3. Within a second the box agent sees `idle` turn into `active` and calls
-   `POST /api/v1/sessions` with the cleaned name, agent, minutes and start time.
+   `POST /api/v1/sessions` with the cleaned name, email, agent, minutes and start time. An
+   email that does not look like one is dropped; the session starts anyway. Only staff see
+   the email (dashboard); the download page never shows it.
 4. The hub answers with `id`, `token`, `code`, `url`, `expires_at`. The agent writes `url`
    to `/run/hackbox/hub-url` and fetches `GET /api/v1/sessions/{id}/qr.png` into
    `/run/hackbox/qr.png`.
@@ -94,7 +97,8 @@ has ever called in.
   (`idle`, `active`, `ending`, `resetting`, or `offline`).
 - A big `mm:ss` time left. It counts down every second between polls; amber under 5 minutes,
   red at zero.
-- The attendee name, the agent, the pickup code and any extra minutes so far.
+- The attendee name, the email under it when given, the agent, the pickup code and any
+  extra minutes so far.
 - A muted line with the programs open on the box, like "Terminal · OpenCode · Chromium". It
   comes from the heartbeat (`activity`), names only, from the box's allow list. Empty when
   the box is idle.
@@ -103,6 +107,10 @@ has ever called in.
 - **End**: asks "End the session on <box> now?", then `POST /dash/boxes/{box}/end`.
 - Buttons are disabled while the box is offline. A command the box does not pick up within
   2 minutes is dropped, so it never hits the next attendee.
+- While the box shows the time-up screen (`ending`), the extend and End buttons give way to
+  **Finish (end the time-up screen)**. It asks for confirmation, then
+  `POST /dash/boxes/{box}/finish` queues a `done` command, which works like the attendee
+  pressing Done: the box resets for the next person. In any other state the hub answers 409.
 - An offline box that is enrolled or has called in before shows **Release name** (and its MAC
   when enrolled). See "A dead box" below.
 - The dashboard refuses any address that acts as a box (403, "The dashboard is not available
@@ -125,7 +133,7 @@ Below the cards, the last 200 sessions, newest first:
 | Column | Shows |
 |---|---|
 | Started | date and time |
-| Box, Name, Agent, Code | as registered |
+| Box, Name, Agent, Code | as registered; the email shows under the name when given |
 | Duration | real time used once ended ("running" before), then planned minutes and extensions |
 | End reason | as the box reported it |
 | Size | the stored tarball |

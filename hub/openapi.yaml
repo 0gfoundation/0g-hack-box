@@ -84,6 +84,11 @@ components:
         minutes: { type: integer, example: 30 }
         started_at: { type: integer, format: int64, description: 'Session start; 0 means now.' }
         local_code: { type: string, description: 'The box''s own pickup code if known; may be empty. Stored, not used yet.' }
+        email:
+          type: string
+          maxLength: 120
+          description: Optional attendee email. Trimmed; if it does not look like local@domain.tld (or is not a string) it is stored as "" and the session is still created. Shown to staff only, never on the public page or in the GitHub repo.
+          example: ada@example.com
     CreateSessionResponse:
       type: object
       required: [id, token, code, url, expires_at]
@@ -125,8 +130,8 @@ components:
       required: [id, op, minutes]
       properties:
         id: { type: string, example: '12' }
-        op: { type: string, enum: [extend, end] }
-        minutes: { type: integer, description: '1..60 for extend, 0 for end' }
+        op: { type: string, enum: [extend, end, done], description: 'done ends the time-up screen early (staff Finish), like the attendee pressing Done.' }
+        minutes: { type: integer, description: '1..60 for extend, 0 for end and done' }
     HeartbeatResponse:
       type: object
       required: [commands, extend]
@@ -240,6 +245,7 @@ components:
         seconds_left: { type: integer }
         session_id: { type: string }
         attendee: { type: string }
+        email: { type: string, description: 'Attendee email of the current session, "" when none' }
         agent: { type: string }
         started_at: { type: integer, format: int64 }
         minutes: { type: integer }
@@ -263,6 +269,7 @@ components:
         agent: { type: string }
         code: { type: string }
         local_code: { type: string }
+        email: { type: string }
         minutes: { type: integer }
         extended_minutes: { type: integer }
         started_at: { type: integer, format: int64 }
@@ -594,6 +601,29 @@ paths:
         '403': { description: 'Cross-origin request.' }
         '404': { description: 'Unknown box.' }
         '415': { description: 'Not JSON.' }
+
+  /dash/boxes/{box}/finish:
+    post:
+      tags: [dashboard]
+      summary: End the time-up screen on a box (queues a done command)
+      description: Only while the box's last reported state is ending. Same guards as the other dashboard POSTs.
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '403': { description: Cross-origin request. }
+        '404': { description: Unknown box. }
+        '409': { description: 'The box is not in state ending.' }
+        '415': { description: Not JSON. }
 
   /dash/boxes/{box}/release:
     post:

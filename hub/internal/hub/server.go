@@ -144,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dash/state", s.dashState)
 	mux.HandleFunc("POST /dash/boxes/{box}/extend", s.dashGuard(s.dashExtend))
 	mux.HandleFunc("POST /dash/boxes/{box}/end", s.dashGuard(s.dashEnd))
+	mux.HandleFunc("POST /dash/boxes/{box}/finish", s.dashGuard(s.dashFinish))
 	mux.HandleFunc("POST /dash/requests/{id}", s.dashGuard(s.dashDecide))
 	mux.HandleFunc("POST /dash/boxes/{box}/release", s.dashGuard(s.dashRelease))
 	mux.HandleFunc("GET /dash/sessions/{id}/download", s.dashDownload)

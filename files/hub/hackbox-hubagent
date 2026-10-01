@@ -143,23 +143,26 @@ def clean_name(raw):
 
 
 def read_attendee():
-    """The attendee's own file (name, then agent id). Read as root, so:
+    """The attendee's own file (name, agent id, email). Read as root, so:
     no symlinks, a regular file owned by the attendee, small."""
     try:
         fd = os.open(NAME_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
-        return "", ""
+        return "", "", ""
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != HACKER_UID or st.st_size > 256:
-            return "", ""
-        raw = os.read(fd, 256).decode("utf-8", "replace")
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != HACKER_UID or st.st_size > 512:
+            return "", "", ""
+        raw = os.read(fd, 512).decode("utf-8", "replace")
     finally:
         os.close(fd)
     lines = raw.split("\n")
     name = clean_name(lines[0]) if lines else ""
     agent = re.sub(r"[^a-z0-9_-]", "", lines[1].lower())[:30] if len(lines) > 1 else ""
-    return name, agent
+    email = lines[2].strip()[:120] if len(lines) > 2 else ""
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        email = ""
+    return name, agent, email
 
 
 # ------------------------------------------------------------------- http ---
@@ -207,11 +210,11 @@ class Agent:
 
     def on_state(self, state):
         if state == "active" and (self.cur is None or self.cur.get("closed_at")):
-            name, agent = read_attendee()
+            name, agent, email = read_attendee()
             end = read_run("session-end")
             now = int(time.time())
             minutes = (int(end) - now + 59) // 60 if end and end.isdigit() else 0
-            self.cur = {"local_id": uuid.uuid4().hex, "name": name, "agent": agent,
+            self.cur = {"local_id": uuid.uuid4().hex, "name": name, "agent": agent, "email": email,
                         "minutes": minutes, "started_at": now, "session_id": None,
                         "url": None, "code": None, "local_code": None, "closed_at": None,
                         "reason": None}
@@ -266,7 +269,8 @@ class Agent:
 
     def register(self, hub, rec):
         r = hub.call("POST", "/api/v1/sessions", {
-            "name": rec["name"], "agent": rec["agent"], "minutes": rec["minutes"],
+            "name": rec["name"], "agent": rec["agent"], "email": rec.get("email", ""),
+            "minutes": rec["minutes"],
             "started_at": rec["started_at"], "local_code": rec.get("local_code") or ""})
         rec["session_id"], rec["url"], rec["code"] = r["id"], r["url"], r["code"]
         return rec
@@ -363,6 +367,14 @@ class Agent:
             argv = [HACKBOX, "extend", str(minutes)]
         elif op == "end":
             argv = [HACKBOX, "end"]
+        elif op == "done":
+            # Staff closes the time-up screen: the same flag as the attendee's Done button.
+            if (read_run("state") or "") == "ending":
+                put_run("ending-done", "1")
+                ok, msg = True, "time-up screen closed"
+            else:
+                ok, msg = False, "not on the time-up screen"
+            argv = None
         else:
             ok, msg = False, "refused: unknown or out of range command"
             log("%s %r" % (msg, cmd))

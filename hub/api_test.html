@@ -99,6 +99,7 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
   </div>
   <button onclick="call('POST','/dash/boxes/'+enc(v('box'))+'/extend',{minutes:+v('min')})">Queue extend</button>
   <button onclick="call('POST','/dash/boxes/'+enc(v('box'))+'/end',{})">Queue end</button>
+  <button onclick="call('POST','/dash/boxes/'+enc(v('box'))+'/finish',{})">Queue finish (state ending)</button>
   <button onclick="if(confirm('Release '+v('box')+'?'))call('POST','/dash/boxes/'+enc(v('box'))+'/release',{})">Release name</button>
   <div class="cols">
     <div><label>Request id</label><input id="rid"></div>
@@ -127,7 +128,7 @@ const v = id => $(id).value.trim();
 const enc = encodeURIComponent;
 const now = () => Math.floor(Date.now() / 1000);
 $("base").value = location.protocol.startsWith("http") ? location.origin : "http://localhost:8210";
-$("b_create").value = JSON.stringify({name: "Ada Lovelace", agent: "claude", minutes: 30, started_at: now(), local_code: ""}, null, 1);
+$("b_create").value = JSON.stringify({name: "Ada Lovelace", agent: "claude", minutes: 30, started_at: now(), local_code: "", email: "ada@example.com"}, null, 1);
 $("b_end").value = JSON.stringify({ended_at: now(), reason: "timeout", empty: false}, null, 1);
 $("b_cfg").value = JSON.stringify({scope: "*", set: {"anthropic-api-key": "sk-ant-test-12345678", "0g-router-key": "", agents: "claude opencode"}, clear: []}, null, 1);
 $("b_hb").value = JSON.stringify({session_id: "", state: "active", seconds_left: 1500, extend_request_at: 0, status: {state: "active"}, activity: ["Terminal", "OpenCode", "Chromium"]}, null, 1);

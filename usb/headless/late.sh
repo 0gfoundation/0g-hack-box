@@ -45,7 +45,7 @@ sed -i '/^ADMIN_PASSWORD_HASH=/d' "$T/etc/hackbox/headless.env"
 if [ -f "$S/hub.conf" ]; then
   install -m 0600 "$S/hub.conf" "$T/etc/hackbox/hub.conf"
   install -d -m 0755 "$T/etc/hackbox/conf.d"
-  printf 'HUB_ENABLED=1\nEND_GRACE_SECONDS=180\n' > "$T/etc/hackbox/conf.d/38-hub.conf"
+  printf 'HUB_ENABLED=1\nEND_GRACE_SECONDS=1800\n' > "$T/etc/hackbox/conf.d/38-hub.conf"
 fi
 install -m 0644 "$S/authorized_keys" "$T/etc/hackbox/headless-authorized_keys"
 

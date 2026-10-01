@@ -43,6 +43,12 @@ main{padding:22px;max-width:1500px;margin:0 auto}
 .who{display:flex;flex-direction:column;gap:2px;min-height:44px}
 .who .name{font-size:19px;font-weight:700}
 .who .meta{color:var(--muted);font-size:14px}
+.who .email{color:var(--muted);font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.who .email:empty{display:none}
+.finrow{display:none}
+.card.ending .row.ctl{display:none}
+.card.ending .finrow{display:flex}
+button.fin{width:100%;background:linear-gradient(135deg,var(--warn),#e08a1e);border-color:transparent;color:#1a1204}
 .row{display:flex;gap:8px;flex-wrap:wrap}
 button{font:inherit;font-weight:700;border-radius:12px;border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:10px 14px;cursor:pointer;min-width:58px}
 button:hover{border-color:var(--accent)}
@@ -194,20 +200,24 @@ function makeCard(name) {
   el.innerHTML =
     '<div class="top"><span class="dot"></span><span class="boxname"></span><span class="spacer"></span><span class="badge"></span></div>' +
     '<div class="time idle">--:--</div>' +
-    '<div class="who"><span class="name"></span><span class="meta"></span></div>' +
+    '<div class="who"><span class="name"></span><span class="email"></span><span class="meta"></span></div>' +
     '<div class="act"></div>' +
     '<span class="keys"></span>' +
     '<div class="reqslot"></div>' +
-    '<div class="row">' +
+    '<div class="row ctl">' +
       '<button data-x="5">+5</button><button data-x="10">+10</button><button data-x="15">+15</button>' +
       '<button class="end">End</button>' +
     '</div>' +
+    '<div class="row finrow"><button class="fin">Finish (end the time-up screen)</button></div>' +
     '<div class="relrow"><span class="relinfo"></span><button class="sm rel">Release name</button></div>';
   $(".boxname", el).textContent = name;
   el.querySelectorAll("button[data-x]").forEach(b => b.onclick = () =>
     post("/dash/boxes/" + encodeURIComponent(name) + "/extend", {minutes: +b.dataset.x}, "Extend +" + b.dataset.x + " sent to " + name));
   $(".end", el).onclick = () => {
     if (confirm("End the session on " + name + " now?")) post("/dash/boxes/" + encodeURIComponent(name) + "/end", {}, "End sent to " + name);
+  };
+  $(".fin", el).onclick = () => {
+    if (confirm("End the time-up screen on " + name + " now? The box resets for the next attendee.")) post("/dash/boxes/" + encodeURIComponent(name) + "/finish", {}, "Finish sent to " + name);
   };
   $(".rel", el).onclick = () => {
     if (confirm("Release the name " + name + "?\n\nIts MAC binding and enrolled token are removed, and the next new box can take the name. Only do this for a box that is gone.")) {
@@ -261,6 +271,8 @@ function render() {
     badge.textContent = st; badge.className = "badge " + st;
     const who = b.session_id && b.state !== "idle";
     $(".who .name", el).textContent = who ? (b.attendee || "anonymous") : (b.online ? "Waiting for an attendee" : "No heartbeat");
+    $(".who .email", el).textContent = who ? (b.email || "") : "";
+    el.classList.toggle("ending", b.online && b.state === "ending");
     $(".who .meta", el).textContent = who
       ? [b.agent, b.code, b.extended_minutes ? "+" + b.extended_minutes + " min" : ""].filter(Boolean).join(" · ")
       : (b.last_seen ? "last seen " + ago(state.now - b.last_seen) : "never seen");
@@ -315,7 +327,7 @@ function renderHistory() {
     let gh = '<span class="gh ' + esc(s.github_status) + '"' + (s.github_error ? ' title="' + esc(s.github_error) + '"' : "") + '>' + esc(s.github_status || "-") + '</span>';
     if (s.github_url) gh = '<a href="' + esc(s.github_url) + '" target="_blank" rel="noopener">' + gh + '</a>';
     const files = s.download_url ? '<a href="' + esc(s.download_url) + '">zip</a>' : (s.empty ? '<span class="muted">empty</span>' : '<span class="muted">-</span>');
-    return '<tr><td>' + esc(when(s.started_at)) + '</td><td>' + esc(s.box) + '</td><td class="name">' + esc(s.name || "anonymous") +
+    return '<tr><td>' + esc(when(s.started_at)) + '</td><td>' + esc(s.box) + '</td><td class="name">' + esc(s.name || "anonymous") + (s.email ? '<br><span class="muted" style="font-weight:400">' + esc(s.email) + '</span>' : "") +
       '</td><td>' + esc(s.agent) + '</td><td><code>' + esc(s.code) + '</code></td><td class="num">' + dur + ext +
       '</td><td>' + esc(s.end_reason) + '</td><td class="num">' + esc(size(s.archive_bytes)) + '</td><td>' + gh + '</td><td>' + files + '</td></tr>';
   }).join("");
