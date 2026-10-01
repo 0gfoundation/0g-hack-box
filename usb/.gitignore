@@ -1,0 +1,4 @@
+headless.conf
+*.iso
+*.iso.sha256
+out/

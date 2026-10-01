@@ -1,0 +1,66 @@
+# hack-box headless USB installer settings. Copy to headless.conf (same directory, ignored by
+# git), fill in, then build the stick (README.md, "Headless install"):
+#   vm/lab usb-headless vm/usb/headless.conf
+# This file is a shell file. Quote values with single quotes; a ' inside a value is written '\''.
+# It holds secrets: keep it on your own machine (chmod 600), never commit it, delete it after
+# the event. The finished ISO holds the same secrets (except the plain admin password, which
+# is only stored as a hash), so treat the stick the same way and re-flash it afterwards.
+
+# Hostname. A literal name (hackbox1) is what you will type: ssh hackadmin@hackbox1.local.
+# Or a pattern: {mac4} becomes the last 4 hex digits of the first wired card's MAC address
+# (printed on many stickers). Empty: hackbox-{mac4}.
+HB_HOSTNAME='hackbox1'
+
+# Admin account (the account bootstrap runs as; the attendee account "hacker" is separate).
+ADMIN_USER='hackadmin'
+# Either a plain password (hashed by the build, the plain text is not stored anywhere) ...
+ADMIN_PASSWORD=''
+# ... or a ready hash (openssl passwd -6, or mkpasswd -m yescrypt). Takes precedence.
+ADMIN_PASSWORD_HASH=''
+
+# Wi-Fi. Leave WIFI_SSID empty for a wired-only box. A cable, if plugged in, is always
+# preferred; Wi-Fi is used when there is no cable.
+WIFI_SSID=''
+WIFI_PASSWORD=''
+# Set a username for a WPA2-Enterprise network (802.1X, PEAP with MSCHAPv2), where you log in
+# with a username and a password. Leave empty for a normal password (WPA2/WPA3 personal) network.
+WIFI_USERNAME=''
+# 1 if the network does not broadcast its name.
+WIFI_HIDDEN=0
+# Two-letter country code for the Wi-Fi regulatory domain (channels, power), for example SG.
+WIFI_COUNTRY=''
+# Personal networks only: auto (default; WPA2 and WPA2/WPA3 mixed, WPA3-only if a scan says so),
+# wpa-psk, or sae (force WPA3).
+WIFI_KEY_MGMT='auto'
+# Enterprise only, optional: the RADIUS server certificate must be for this domain suffix.
+WIFI_EAP_DOMAIN=''
+# Enterprise only, optional: outer (anonymous) identity.
+WIFI_ANON_IDENTITY=''
+# Enterprise only. 1 = do NOT check the RADIUS server certificate. Only for a venue network
+# whose server uses a private CA. Risk: a fake access point with the same name can capture the
+# login exchange, and the password can be cracked from it offline. Use a throwaway account.
+WIFI_EAP_NO_CA_CHECK=0
+
+# ssh public keys authorised for the admin account (space separated paths on the build
+# machine). Default: every keys/*.pub in the repo plus /Users/jarvis/.ssh/id_ed25519.pub.
+SSH_KEY_FILES=''
+
+# Tailscale: an auth key (Tailscale admin console, Settings, Keys; reusable or one-off,
+# pre-approved, and tagged with TS_TAG if you use a tag). Empty: Tailscale is skipped
+# (no one is there to click a login link); run setup/05-tailscale.sh later over ssh.
+TS_AUTHKEY=''
+TS_TAG=''
+
+# Optional: a URL that receives a small JSON POST at each stage
+# ({"hostname","ips","stage","detail","time"}). Empty: no reports.
+REPORT_URL=''
+
+# ssh from the LAN after lockdown. auto (default): open when the box did not join Tailscale,
+# closed when it did (then use Tailscale). 1: always open. 0: always closed.
+LAN_SSH='auto'
+
+# PC speaker beeps at each stage (only if the box has a speaker or buzzer). 0 turns them off.
+BEEP=1
+
+# Where the 0g-hack-box repo is (the build copies this tree onto the stick; no git needed).
+REPO_DIR='/Users/jarvis/0g/hack-box/0g-hack-box'

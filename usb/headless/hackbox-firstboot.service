@@ -1,0 +1,16 @@
+[Unit]
+Description=hack-box first boot: network, ssh, provisioning (headless install)
+Documentation=file:///opt/hack-box/docs/INSTALL.md
+Wants=network-online.target NetworkManager.service
+After=network-online.target NetworkManager.service systemd-user-sessions.service
+ConditionPathExists=!/var/lib/hackbox-firstboot.done
+
+[Service]
+# simple, not oneshot: the boot does not wait for this (it can wait for the network forever)
+Type=simple
+ExecStart=/usr/local/sbin/hackbox-firstboot
+TimeoutStartSec=infinity
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
