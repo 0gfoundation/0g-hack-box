@@ -9,6 +9,8 @@
 #   polkit     files/session/polkit/*      -> /etc/polkit-1/rules.d/
 #   tmpfs      /tmp, /var/tmp, /dev/shm capped in /etc/fstab (next boot)
 #   CLI        /usr/local/bin/hackbox -> bin/hackbox in this repo
+#   hub agent  files/hub/hackbox-hubagent -> /usr/local/lib/hackbox/ (idle
+#              until `hackbox hub set`; see docs/superpowers/specs/*session-hub*)
 # Safe mid-session: files are replaced with `install` (new inode, so running
 # scripts keep their old copy), nothing that holds the attendee's session is
 # restarted, and the home is only built here when nobody is using it.
@@ -33,20 +35,24 @@ for f in "$S"/sbin/*; do
 done
 sudo install -d -m 0755 /usr/local/lib/hackbox
 sudo install -m 0755 -o root -g root "$S/overlay/hackbox-overlay" /usr/local/lib/hackbox/hackbox-overlay
+sudo install -m 0755 -o root -g root "$HERE/files/hub/hackbox-hubagent" /usr/local/lib/hackbox/hackbox-hubagent
 sudo ln -sfn "$HERE/bin/hackbox" /usr/local/bin/hackbox
 
 # --- state and runtime dirs ----------------------------------------------
 sudo install -d -m 0755 -o root -g root /var/lib/hackbox
 sudo install -d -m 0700 -o root -g root /var/lib/hackbox/archive
+sudo install -d -m 0700 -o root -g root /var/lib/hackbox/hub
 sudo install -d -m 0755 /etc/tmpfiles.d /etc/systemd/system
 sudo install -m 0644 "$S/units/tmpfiles-hackbox.conf" /etc/tmpfiles.d/hackbox.conf
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/hackbox.conf
 
 # --- systemd units -------------------------------------------------------
 for u in hackbox-home.service hackbox-reset.service hackbox-session.service \
-         hackbox-guard.service hackbox-archive-prune.service hackbox-archive-prune.timer; do
+         hackbox-guard.service hackbox-archive-prune.service hackbox-archive-prune.timer \
+         hackbox-extend-request.service hackbox-done.service; do
   sudo install -m 0644 "$S/units/$u" "/etc/systemd/system/$u"
 done
+sudo install -m 0644 "$HERE/files/hub/hackbox-hubagent.service" /etc/systemd/system/hackbox-hubagent.service
 sudo install -d -m 0755 /etc/systemd/system/lightdm.service.d
 sudo install -m 0644 "$S/units/lightdm-hackbox.conf" /etc/systemd/system/lightdm.service.d/hackbox.conf
 
@@ -94,6 +100,11 @@ fi
 sudo systemctl daemon-reload
 sudo systemctl enable hackbox-home.service hackbox-guard.service >/dev/null
 sudo systemctl enable --now hackbox-archive-prune.timer >/dev/null
+# The hub agent runs only once a hub is set (hackbox hub set); pick up a new copy.
+if [ -f /etc/hackbox/hub.conf ]; then
+  sudo systemctl enable hackbox-hubagent.service >/dev/null
+  sudo systemctl restart hackbox-hubagent.service
+fi
 
 # --- the home ------------------------------------------------------------
 if mountpoint -q "$H"; then

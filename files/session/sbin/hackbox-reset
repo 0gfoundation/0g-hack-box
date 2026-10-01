@@ -268,6 +268,8 @@ if [ "$MODE" = service ] && [ "$NOW" = 0 ] && [ "$(state)" = active ]; then
   log "session ending, archive code $(cat "$RUN/code" 2>/dev/null || echo none), wipe in ${grace}s"
   for _ in $(seq "$grace"); do
     [ -e "$RUN/reset-now" ] && { log "immediate reset requested during the grace period"; break; }
+    # The attendee's Done button (hackbox-done.service, root) ends the wait.
+    [ -e "$RUN/ending-done" ] && { log "attendee pressed Done"; break; }
     sleep 1
   done
 fi
@@ -318,9 +320,13 @@ if [ "$MODE" = service ] && mountpoint -q "$H"; then
     code=$(cat "$RUN/code")
     if timeout 90 "$ARCHIVE" create "$code"; then
       log "project archived as $code"
+      put last-archive "$code $(date +%s)"
     else
       log "archive $code failed or timed out"
+      put last-archive "failed $(date +%s)"
     fi
+  else
+    put last-archive "none $(date +%s)"
   fi
 fi
 
@@ -338,7 +344,9 @@ run_hooks
 
 # --- idle.
 rm -f "$RUN/session-end" "$RUN/ending-until" "$RUN/code" "$RUN/warn" \
-      "$RUN/start-minutes" "$RUN/reset-now"
+      "$RUN/start-minutes" "$RUN/reset-now" "$RUN/ending-done" \
+      "$RUN/extend-request" "$RUN/extend-status" "$RUN/hub-url" "$RUN/hub-code" \
+      "$RUN/qr.png" "$RUN/attendee"
 put state idle
 trap - TERM INT
 

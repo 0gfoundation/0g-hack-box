@@ -1,0 +1,8 @@
+{
+  "public_base_url": "http://localhost:8210",
+  "boxes": {
+    "devtoken": "hackbox1"
+  },
+  "github": {"org": "0g-hackbox-sessions", "token": ""},
+  "download_days": 7
+}

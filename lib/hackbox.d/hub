@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# hackbox-help: session hub: set <url> <box-token> | status | off
+set -euo pipefail
+RUN=/run/hackbox
+CONF=/etc/hackbox/hub.conf
+LOCAL=/etc/hackbox/conf.d/38-hub.conf
+
+# The overlay reads conf.d when it starts: relaunch it on an idle box so the
+# welcome screen gains or loses the name field (hackbox-guard restarts it).
+relaunch_overlay() {
+  if [ "$(cat "$RUN/state" 2>/dev/null)" = idle ]; then
+    sudo pkill -u hacker -f hackbox-overlay 2>/dev/null || true
+  else
+    echo "a session is running: the welcome screen changes after the next reset"
+  fi
+}
+
+case "${1:-}" in
+  set)
+    url=${2:-} token=${3:-}
+    [[ $url =~ ^https?://[A-Za-z0-9.:-]+(/.*)?$ ]] && [[ $token =~ ^[A-Za-z0-9._-]{16,}$ ]] || {
+      echo "usage: hackbox hub set <http(s)://host:port> <box-token>" >&2; exit 2; }
+    printf "HUB_URL='%s'\nHUB_TOKEN='%s'\n" "$url" "$token" |
+      sudo install -m 0600 -o root -g root /dev/stdin "$CONF"
+    # 3 minutes on the time-up screen (Done ends it sooner), name on the welcome screen.
+    printf 'HUB_ENABLED=1\nEND_GRACE_SECONDS=180\n' |
+      sudo install -m 0644 -o root -g root /dev/stdin "$LOCAL"
+    sudo systemctl enable --now hackbox-hubagent.service >/dev/null
+    sudo systemctl restart hackbox-hubagent.service
+    relaunch_overlay
+    sleep 4
+    "$0" status
+    ;;
+  status)
+    if ! sudo test -f "$CONF"; then echo "hub         not configured (hackbox hub set <url> <token>)"; exit 0; fi
+    echo "hub         $(sudo sed -n "s/^HUB_URL='\(.*\)'$/\1/p" "$CONF")"
+    echo "agent       $(systemctl is-active hackbox-hubagent.service 2>/dev/null || true)"
+    if [ -r "$RUN/hub-status" ]; then
+      python3 - "$RUN/hub-status" <<'PY'
+import json, sys, time
+s = json.load(open(sys.argv[1]))
+ago = int(time.time()) - s.get("last_ok", 0) if s.get("last_ok") else None
+print("link        %s%s" % (s.get("hub"), ", last ok %ds ago" % ago if ago is not None else ""))
+print("uploads     %d waiting" % s.get("jobs", 0))
+if s.get("last_error"):
+    print("last error  %s" % s["last_error"])
+PY
+    fi
+    [ -r "$RUN/hub-url" ] && echo "session url $(cat "$RUN/hub-url")"
+    true
+    ;;
+  off)
+    sudo systemctl disable --now hackbox-hubagent.service >/dev/null 2>&1 || true
+    sudo rm -f "$CONF" "$LOCAL"
+    relaunch_overlay
+    echo "hub switched off; the box keeps local pickup codes only"
+    ;;
+  *)
+    echo "usage: hackbox hub set <url> <box-token> | status | off" >&2; exit 2 ;;
+esac

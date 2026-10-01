@@ -9,8 +9,11 @@ nothing about the clock.
 
 Faces, by /run/hackbox/state (SPEC 3.2 and 3.6):
   idle       full-screen welcome, rules, one Start button per agent
+             (with a hub: the attendee's name first)
   active     small always-on-top countdown pill with "End now"
+             (with a hub: "More time", which asks the staff)
   ending     full-screen "Time is up" with the archive code
+             (with a hub: QR code and link to download, and Done)
   resetting  full-screen "Resetting"
 
 Python 3 and GTK 3 through gi only (both ship with Mint Cinnamon). No GL.
@@ -31,7 +34,8 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
 
 RUN = "/run/hackbox"
 AGENTS_FILE = "/etc/hackbox/agents.json"
@@ -54,14 +58,15 @@ AGENT_WRAPPER = (
 def load_conf():
     """Source /etc/hackbox/conf.d the same way the shell helpers do."""
     conf = {"SESSION_MINUTES": "30", "WARN_MINUTES": "5 1",
-            "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24"}
+            "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24", "HUB_ENABLED": "0"}
     script = ('for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done; '
-              'printf "%s\\n" "$SESSION_MINUTES" "$WARN_MINUTES" "$END_GRACE_SECONDS" "$ARCHIVE_HOURS"')
+              'printf "%s\\n" "$SESSION_MINUTES" "$WARN_MINUTES" "$END_GRACE_SECONDS" "$ARCHIVE_HOURS" '
+              '"$HUB_ENABLED"')
     try:
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              timeout=5, env={"PATH": "/usr/bin:/bin"}).stdout.split("\n")
         for key, val in zip(("SESSION_MINUTES", "WARN_MINUTES", "END_GRACE_SECONDS",
-                             "ARCHIVE_HOURS"), out):
+                             "ARCHIVE_HOURS", "HUB_ENABLED"), out):
             if val.strip():
                 conf[key] = val.strip()
     except (OSError, subprocess.SubprocessError):
@@ -126,6 +131,21 @@ def start_unit(unit, done):
             ok, msg = False, str(e)
         GLib.idle_add(done, ok, msg)
     threading.Thread(target=work, daemon=True).start()
+
+
+def save_attendee(name, agent_id):
+    """Name and agent for the hub agent, which reads this file as root with
+    care (no symlinks, small, owned by the attendee). The home is wiped at
+    every reset, so it cannot leak into the next session."""
+    path = os.path.join(HOME, ".cache", "hackbox", "attendee")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(name[:40] + "\n" + agent_id[:30] + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def open_terminal(agent=None):
@@ -199,6 +219,13 @@ CSS_TEMPLATE = """
 .hb-pill.crit label { color: #ff7b72; }
 .hb-endbtn { font-size: {pillbtn}px; padding: 2px 10px; background-image: none;
              background-color: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+.hb-name  { font-size: {body}px; padding: 10px 18px; border-radius: 10px;
+            background-image: none; background-color: #161b22; color: #f0f6fc;
+            border: 2px solid #30363d; caret-color: #7ee787; }
+.hb-name:focus { border-color: #7ee787; }
+.hb-url   { font-size: {small}px; color: #79c0ff; font-family: monospace; }
+.hb-endbtn:disabled { color: #6e7681; background-color: #161b22; }
+.hb-ask   { color: #8b949e; font-size: {pillbtn}px; padding: 0 6px; }
 .hb-toast { background-color: #3d2e00; border: 3px solid #d29922; border-radius: 14px; }
 .hb-toast.crit { background-color: #3d0f0f; border-color: #f85149; }
 .hb-toast label { color: #ffffff; font-size: {toast}px; font-weight: bold; }
@@ -269,6 +296,8 @@ class FullScreen(Gtk.Window):
         self.stick()
         self.get_style_context().add_class("hb-full")
         self.connect("delete-event", lambda *_: True)   # Alt+F4 does nothing
+        self.busy = False
+        self.qr_shown = None
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.NONE)
         self.add(self.stack)
@@ -299,6 +328,21 @@ class FullScreen(Gtk.Window):
             rules.pack_start(label("•  " + line, "hb-rule", xalign=0.0), False, False, 0)
         box.pack_start(rules, False, False, 24)
 
+        # With a hub: the name goes into the session history and the download page.
+        self.name_entry = None
+        if self.app.hub:
+            self.name_entry = Gtk.Entry()
+            self.name_entry.set_placeholder_text("Your name")
+            self.name_entry.set_max_length(40)
+            self.name_entry.set_alignment(0.5)
+            self.name_entry.set_width_chars(24)
+            self.name_entry.set_halign(Gtk.Align.CENTER)
+            self.name_entry.get_style_context().add_class("hb-name")
+            self.name_entry.connect("changed", lambda *_: self._name_changed())
+            # A focused entry hides its placeholder, so say it above as well.
+            box.pack_start(label("Your name", "hb-body"), False, False, 0)
+            box.pack_start(self.name_entry, False, False, 4)
+
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=28)
         buttons.set_halign(Gtk.Align.CENTER)
         self.start_buttons = []
@@ -315,7 +359,23 @@ class FullScreen(Gtk.Window):
         box.pack_start(self.welcome_error, False, False, 0)
         box.pack_start(label("Your project folder is ~/project. The agent opens there.",
                              "hb-muted"), False, False, 20)
+        if self.app.hub:
+            box.pack_start(label("When time is up you get a QR code to download your project. "
+                                 "A copy is kept privately by the organisers.", "hb-muted",
+                                 wrap=True), False, False, 0)
+        self._name_changed()
         return box
+
+    def attendee_name(self):
+        if self.name_entry is None:
+            return ""
+        return " ".join(self.name_entry.get_text().split())
+
+    def _name_changed(self):
+        """Start stays disabled until a name of 2 or more characters is typed."""
+        ok = self.name_entry is None or len(self.attendee_name()) >= 2
+        for b in self.start_buttons:
+            b.set_sensitive(ok and not self.busy)
 
     def _start_button(self, text, note, agent):
         btn = Gtk.Button()
@@ -331,14 +391,30 @@ class FullScreen(Gtk.Window):
 
     def _build_ending(self):
         box = self._column()
-        box.pack_start(label("Time is up. Thanks for hacking!", "hb-title"), False, False, 0)
+        self.ending_title = label("Time is up. Thanks for hacking!", "hb-title")
+        box.pack_start(self.ending_title, False, False, 0)
         self.code_intro = label("", "hb-body", wrap=True)
+        self.qr_image = Gtk.Image()
+        self.url_label = label("", "hb-url", wrap=True)
+        self.url_label.set_selectable(False)
         self.code_label = label("", "hb-code")
         self.code_after = label("", "hb-body", wrap=True)
+        self.done_button = Gtk.Button(label="Done")
+        self.done_button.get_style_context().add_class("hb-start")
+        self.done_button.set_halign(Gtk.Align.CENTER)
+        self.done_button.connect("clicked", self._done)
         self.ending_countdown = label("", "hb-muted")
-        for w in (self.code_intro, self.code_label, self.code_after, self.ending_countdown):
+        # Shown or hidden per session by _update_ending, not by show_all().
+        for w in (self.qr_image, self.url_label, self.done_button):
+            w.set_no_show_all(True)
+        for w in (self.code_intro, self.qr_image, self.url_label, self.code_label,
+                  self.code_after, self.done_button, self.ending_countdown):
             box.pack_start(w, False, False, 8)
         return box
+
+    def _done(self, *_):
+        self.done_button.set_sensitive(False)
+        start_unit("hackbox-done.service", lambda ok, msg: False)
 
     def _build_resetting(self):
         box = self._column()
@@ -348,14 +424,15 @@ class FullScreen(Gtk.Window):
         return box
 
     def set_busy(self, busy, error=""):
-        for b in self.start_buttons:
-            b.set_sensitive(not busy)
+        self.busy = busy
+        self._name_changed()
         self.welcome_error.set_text(error)
 
     def show_face(self, face):
         if face != self.face:
-            self.stack.set_visible_child_name(face)
             self.face = face
+            if face == "ending":
+                self.done_button.set_sensitive(True)
         if face == "ending":
             self._update_ending()
         geo = primary_geometry()
@@ -364,12 +441,64 @@ class FullScreen(Gtk.Window):
             self.resize(geo.width, geo.height)
             self.show_all()
             self.fullscreen()
+        # After show_all: a Gtk.Stack ignores a switch to a child that is not
+        # visible yet, which left an overlay started mid "ending" (relaunched
+        # by the guard) on the welcome face.
+        if self.stack.get_visible_child_name() != face:
+            self.stack.set_visible_child_name(face)
         # Keep the gate in front: taken back if the attendee switches away.
         if not self.is_active():
             self.set_keep_above(True)
             self.present()
 
     def _update_ending(self):
+        name = read_run("attendee")
+        self.ending_title.set_text("Time is up. Thanks, %s!" % name.split()[0] if name
+                                   else "Time is up. Thanks for hacking!")
+        self.done_button.set_visible(self.app.hub)
+        url, hub_code = read_run("hub-url"), read_run("hub-code")
+        if url and hub_code and self._show_qr():
+            # The hub has the session: the phone page says "Preparing" until the
+            # reset archived and the agent uploaded ~/project, a few seconds after Done.
+            self.code_intro.set_text("Scan to download your project (valid 7 days):")
+            self.url_label.set_text(url)
+            self.code_label.set_text(hub_code)
+            self.code_after.set_text("Or type this code at %s/code\n"
+                                     "Dependencies, build output and secret files such as .env "
+                                     "are not kept." % url.split("/d/")[0])
+            self.url_label.show()
+        else:
+            self.qr_image.hide()
+            self.url_label.hide()
+            self._local_code()
+        until = read_run_int("ending-until")
+        if until:
+            left = max(0, until - int(time.time()))
+            self.ending_countdown.set_text(("Press Done when you have it. " if self.app.hub else "")
+                                           + "This machine is wiped in %d s." % left)
+        else:
+            self.ending_countdown.set_text("")
+
+    def _show_qr(self):
+        """The hub's QR image, scaled to a third of the screen height. False
+        when there is none (hub down at the start of the session)."""
+        path = os.path.join(RUN, "qr.png")
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return False
+        if self.qr_shown != mtime:
+            try:
+                size = int(primary_geometry().height / 3)
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+            except GLib.Error:
+                return False
+            self.qr_image.set_from_pixbuf(pix)
+            self.qr_shown = mtime
+        self.qr_image.show()
+        return True
+
+    def _local_code(self):
         code = read_run("code")
         hours = as_int(self.app.conf["ARCHIVE_HOURS"], 24)
         if code:
@@ -382,12 +511,6 @@ class FullScreen(Gtk.Window):
             self.code_intro.set_text("There was nothing new in ~/project to save.")
             self.code_label.set_text("")
             self.code_after.set_text("")
-        until = read_run_int("ending-until")
-        if until:
-            left = max(0, until - int(time.time()))
-            self.ending_countdown.set_text("This machine is wiped in %d s." % left)
-        else:
-            self.ending_countdown.set_text("")
 
 
 class Pill(Gtk.Window):
@@ -416,9 +539,51 @@ class Pill(Gtk.Window):
         end.get_style_context().add_class("hb-endbtn")
         end.connect("clicked", self._confirm_end)
         box.pack_start(ev, False, False, 0)
+        # With a hub: ask the staff for more time (approved on the dashboard).
+        self.more = self.ask_label = None
+        if app.hub:
+            self.more = Gtk.Button(label="More time")
+            self.more.get_style_context().add_class("hb-endbtn")
+            self.more.connect("clicked", self._ask_more)
+            self.ask_label = Gtk.Label()
+            self.ask_label.get_style_context().add_class("hb-ask")
+            box.pack_start(self.more, False, False, 0)
+            box.pack_start(self.ask_label, False, False, 0)
         box.pack_start(end, False, False, 0)
         self.add(box)
         self.dialog = None
+        self.asked_at = 0
+
+    def _ask_more(self, *_):
+        self.asked_at = time.time()
+        start_unit("hackbox-extend-request.service", lambda ok, msg: False)
+
+    def update_request(self):
+        """Mirror /run/hackbox/extend-status (root writes it): pending while
+        the staff decide, then the answer for 20 s. No new request for 2
+        minutes after a decline (the request script enforces it too)."""
+        if self.more is None:
+            return
+        parts = (read_run("extend-status") or "").split()
+        try:
+            age = time.time() - os.path.getmtime(os.path.join(RUN, "extend-status"))
+        except OSError:
+            age = 1e9
+        status = parts[0] if parts else ""
+        if status == "pending":
+            text, can_ask = "asked the staff…", False
+        elif time.time() - self.asked_at < 5:
+            text, can_ask = "asking…", False
+        elif status == "approved" and age < 20:
+            text, can_ask = "+%s min" % (parts[1] if len(parts) > 1 else "?"), True
+        elif status == "declined" and age < 120:
+            text, can_ask = ("not this time" if age < 20 else ""), False
+        else:
+            text, can_ask = "", True
+        if self.ask_label.get_text() != text:
+            self.ask_label.set_text(text)
+        if self.more.get_sensitive() != can_ask:
+            self.more.set_sensitive(can_ask)
 
     def _toggle_edge(self, *_):
         self.at_top = not self.at_top
@@ -525,6 +690,7 @@ class Toast(Gtk.Window):
 class Overlay:
     def __init__(self):
         self.conf = load_conf()
+        self.hub = self.conf.get("HUB_ENABLED") == "1"
         self.agents = load_agents()
         self.provider = Gtk.CssProvider()
         install_css(self.provider)
@@ -550,6 +716,8 @@ class Overlay:
     def begin(self, agent):
         """Start button: ask systemd for the timer, then open the terminal."""
         self.full.set_busy(True, "")
+        if self.hub:
+            save_attendee(self.full.attendee_name(), agent["id"] if agent else "")
         self.we_started = True
         self.pending_agent = agent
         self.start_deadline = time.time() + 15
@@ -579,6 +747,7 @@ class Overlay:
                 self.we_started = False
                 self.pending_agent = None
             self.pill.update(max(0, end - int(time.time())))
+            self.pill.update_request()
             self._check_warning()
         elif state in ("ending", "resetting"):
             self.pill.hide_all()

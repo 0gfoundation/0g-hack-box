@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hub API test</title>
+<style>
+:root{--bg:#0b0d12;--panel:#141821;--line:#262d3b;--text:#e8ecf3;--muted:#8b95a7;--accent:#9b7bff;--ok:#38d39f;--bad:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:20px;margin:0 0 4px}
+p.note{color:var(--muted);margin:0 0 18px}
+fieldset{border:1px solid var(--line);border-radius:12px;background:var(--panel);margin:0 0 14px;padding:12px 14px}
+legend{padding:0 6px;font-weight:700}
+label{display:block;color:var(--muted);font-size:12px;margin:6px 0 3px}
+input,textarea{width:100%;background:#0e1118;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+textarea{min-height:76px;resize:vertical}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:760px){.cols{grid-template-columns:1fr}}
+button{font:inherit;font-weight:700;border-radius:8px;border:1px solid var(--line);background:#1b2130;color:var(--text);padding:8px 12px;cursor:pointer;margin:8px 6px 0 0}
+button:hover{border-color:var(--accent)}
+code{color:var(--accent)}
+pre{background:#0e1118;border:1px solid var(--line);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto;margin:0}
+.status{font-weight:700;margin:8px 0 4px}
+.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}
+#qr img{width:200px;height:200px;background:#fff;border-radius:8px;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Hack-box hub API test</h1>
+<p class="note">Exercises the box API (<code>/api/v1/*</code>, bearer token) and the dashboard API (<code>/dash/*</code>).
+The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-origin. Opened as a file, the browser blocks the calls (no CORS).</p>
+
+<fieldset><legend>Connection</legend>
+  <div class="cols">
+    <div><label>Base URL</label><input id="base"></div>
+    <div><label>Box token (Authorization: Bearer ...)</label><input id="tok" value="devtoken"></div>
+  </div>
+  <div class="cols">
+    <div><label>Session id (filled by Create session)</label><input id="sid"></div>
+    <div><label>Download token (filled by Create session)</label><input id="dtok"></div>
+  </div>
+  <button onclick="call('GET','/healthz')">GET /healthz</button>
+</fieldset>
+
+<fieldset><legend>Box: sessions</legend>
+  <label>POST /api/v1/sessions body</label>
+  <textarea id="b_create"></textarea>
+  <button onclick="createSession()">Create session</button>
+  <button onclick="qr()">GET qr.png</button>
+  <div id="qr"></div>
+  <label>POST /api/v1/sessions/{id}/end body</label>
+  <textarea id="b_end"></textarea>
+  <button onclick="call('POST','/api/v1/sessions/'+v('sid')+'/end',body('b_end'),true)">End session</button>
+  <label>PUT /api/v1/sessions/{id}/archive (pick a .tar.gz)</label>
+  <input type="file" id="arch" accept=".gz,.tgz,application/gzip">
+  <button onclick="upload()">Upload archive</button>
+</fieldset>
+
+<fieldset><legend>Box: heartbeat and commands</legend>
+  <label>POST /api/v1/heartbeat body (session_id is filled from above when empty)</label>
+  <textarea id="b_hb"></textarea>
+  <button onclick="heartbeat(false)">Heartbeat</button>
+  <button onclick="heartbeat(true)">Heartbeat with extend request now</button>
+  <div class="cols">
+    <div><label>Command id</label><input id="cid"></div>
+    <div><label>POST /api/v1/commands/{id}/result body</label><input id="b_res" value='{"ok":true,"message":"done"}'></div>
+  </div>
+  <button onclick="call('POST','/api/v1/commands/'+v('cid')+'/result',body('b_res'),true)">Post command result</button>
+</fieldset>
+
+<fieldset><legend>Dashboard</legend>
+  <button onclick="call('GET','/dash/state')">GET /dash/state</button>
+  <div class="cols">
+    <div><label>Box name</label><input id="box" value="hackbox1"></div>
+    <div><label>Minutes</label><input id="min" value="5"></div>
+  </div>
+  <button onclick="call('POST','/dash/boxes/'+enc(v('box'))+'/extend',{minutes:+v('min')})">Queue extend</button>
+  <button onclick="call('POST','/dash/boxes/'+enc(v('box'))+'/end',{})">Queue end</button>
+  <div class="cols">
+    <div><label>Request id</label><input id="rid"></div>
+    <div><label>&nbsp;</label>
+      <button onclick="call('POST','/dash/requests/'+v('rid'),{approve:true,minutes:+v('min')})">Approve</button>
+      <button onclick="call('POST','/dash/requests/'+v('rid'),{approve:false})">Decline</button></div>
+  </div>
+  <button onclick="openPath('/dash/sessions/'+v('sid')+'/download')">Staff download zip</button>
+</fieldset>
+
+<fieldset><legend>Public pages</legend>
+  <button onclick="openPath('/d/'+v('dtok'))">Open /d/{token}</button>
+  <button onclick="openPath('/d/'+v('dtok')+'/download')">Download zip</button>
+  <button onclick="openPath('/code')">Open /code</button>
+</fieldset>
+
+<fieldset><legend>Response</legend>
+  <div class="status" id="st">no call yet</div>
+  <pre id="out"></pre>
+</fieldset>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const v = id => $(id).value.trim();
+const enc = encodeURIComponent;
+const now = () => Math.floor(Date.now() / 1000);
+$("base").value = location.protocol.startsWith("http") ? location.origin : "http://localhost:8210";
+$("b_create").value = JSON.stringify({name: "Ada Lovelace", agent: "claude", minutes: 30, started_at: now(), local_code: ""}, null, 1);
+$("b_end").value = JSON.stringify({ended_at: now(), reason: "timeout", empty: false}, null, 1);
+$("b_hb").value = JSON.stringify({session_id: "", state: "active", seconds_left: 1500, extend_request_at: 0, status: {state: "active"}}, null, 1);
+
+function body(id) { try { return JSON.parse($(id).value); } catch (e) { show(0, "bad JSON in " + id + ": " + e.message); throw e; } }
+function show(code, text) {
+  const st = $("st");
+  st.textContent = code ? "HTTP " + code : "error";
+  st.className = "status " + (code >= 200 && code < 300 ? "ok" : "bad");
+  try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (e) {}
+  $("out").textContent = text;
+}
+async function call(method, path, data, box) {
+  const h = {};
+  if (path.startsWith("/api/") || box) h["Authorization"] = "Bearer " + v("tok");
+  let b;
+  if (data !== undefined) { h["Content-Type"] = "application/json"; b = JSON.stringify(data); }
+  try {
+    const r = await fetch(v("base") + path, {method, headers: h, body: b});
+    const t = await r.text();
+    show(r.status, t);
+    try { return {status: r.status, json: JSON.parse(t)}; } catch (e) { return {status: r.status}; }
+  } catch (e) { show(0, String(e)); return {status: 0}; }
+}
+async function createSession() {
+  const r = await call("POST", "/api/v1/sessions", body("b_create"));
+  if (r.json && r.json.id) { $("sid").value = r.json.id; $("dtok").value = r.json.token; }
+}
+async function heartbeat(ask) {
+  const b = body("b_hb");
+  if (!b.session_id) b.session_id = v("sid");
+  if (ask) b.extend_request_at = now();
+  const r = await call("POST", "/api/v1/heartbeat", b);
+  if (r.json && r.json.commands && r.json.commands.length) $("cid").value = r.json.commands[0].id;
+  if (ask) {
+    const s = await fetch(v("base") + "/dash/state").then(x => x.json()).catch(() => null);
+    const bx = s && s.boxes.find(x => x.session_id === b.session_id && x.request);
+    if (bx) $("rid").value = bx.request.id;
+  }
+}
+async function qr() {
+  try {
+    const r = await fetch(v("base") + "/api/v1/sessions/" + v("sid") + "/qr.png", {headers: {Authorization: "Bearer " + v("tok")}});
+    if (!r.ok) { show(r.status, await r.text()); return; }
+    const url = URL.createObjectURL(await r.blob());
+    $("qr").innerHTML = ""; const img = document.createElement("img"); img.src = url; $("qr").appendChild(img);
+    show(r.status, "PNG, " + r.headers.get("Content-Type"));
+  } catch (e) { show(0, String(e)); }
+}
+async function upload() {
+  const f = $("arch").files[0];
+  if (!f) { show(0, "pick a .tar.gz first"); return; }
+  try {
+    const r = await fetch(v("base") + "/api/v1/sessions/" + v("sid") + "/archive",
+      {method: "PUT", headers: {Authorization: "Bearer " + v("tok"), "Content-Type": "application/gzip"}, body: f});
+    show(r.status, await r.text());
+  } catch (e) { show(0, String(e)); }
+}
+function openPath(p) { window.open(v("base") + p, "_blank", "noopener"); }
+</script>
+</body>
+</html>

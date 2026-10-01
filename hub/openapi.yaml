@@ -1,0 +1,493 @@
+openapi: 3.0.3
+info:
+  title: hack-box session hub
+  version: 1.0.0
+  description: |
+    The hub behind the 0G hack-boxes: session registry, archive store, attendee
+    download pages, GitHub push queue and the staff dashboard.
+
+    Three surfaces:
+
+    - Box API (`/api/v1/*`): called only by `hackbox-hubagent` on each box, with
+      `Authorization: Bearer <box token>`. The hub config maps tokens to box names.
+    - Public pages (`/d/*`, `/code`, `/healthz`): the only paths the Cloudflare tunnel carries.
+    - Dashboard (`/`, `/dash/*`): tailnet only, no auth of its own.
+
+    Tunnel guard: any request to `/`, `/dash/*` or `/api/*` that carries a
+    `Cf-Connecting-IP` header gets 404, so a tunnel misconfiguration cannot publish them.
+
+    Times are Unix seconds. JSON in and out unless noted.
+servers:
+  - url: http://localhost:8210
+    description: local or tailnet
+  - url: https://hackbox.udhaykumarbala.dev
+    description: public tunnel (public pages only)
+tags:
+  - name: box
+    description: Box agent API (bearer token)
+  - name: public
+    description: Attendee pages
+  - name: dashboard
+    description: Staff dashboard (tailnet only)
+
+components:
+  securitySchemes:
+    boxToken:
+      type: http
+      scheme: bearer
+      description: Per-box token from the hub config (`boxes` map).
+  parameters:
+    SessionID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Opaque session id returned by POST /api/v1/sessions.
+    DownloadToken:
+      name: token
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z2-7]{32}$' }
+  responses:
+    Unauthorized:
+      description: Missing or unknown box token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Unknown id, or the session belongs to another box.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Empty:
+      description: Done.
+      content:
+        application/json:
+          schema: { type: object, additionalProperties: false, example: {} }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    CreateSessionRequest:
+      type: object
+      properties:
+        name: { type: string, description: 'Attendee name, cleaned by the agent (max 40 printable chars). Empty is allowed.' }
+        agent: { type: string, example: claude }
+        minutes: { type: integer, example: 30 }
+        started_at: { type: integer, format: int64, description: 'Session start; 0 means now.' }
+        local_code: { type: string, description: 'The box''s own pickup code if known; may be empty. Stored, not used yet.' }
+    CreateSessionResponse:
+      type: object
+      required: [id, token, code, url, expires_at]
+      properties:
+        id: { type: string, example: 3ndygixfs5sutvde }
+        token: { type: string, description: '32 chars, lowercase base32', example: uktyji6v2ifs7fzohlrda6vdeyb6apx6 }
+        code: { type: string, description: '6 chars from ABCDEFGHJKLMNPQRSTUVWXYZ23456789, unique among unexpired sessions', example: K7MZQ2 }
+        url: { type: string, example: 'https://hackbox.udhaykumarbala.dev/d/uktyji6v2ifs7fzohlrda6vdeyb6apx6' }
+        expires_at: { type: integer, format: int64, description: 'Start (or now) plus download_days. Pushed out to ended_at plus download_days when the session ends.' }
+    HeartbeatRequest:
+      type: object
+      properties:
+        session_id:
+          description: Current session id, empty or null when idle. A number is accepted too.
+          oneOf: [ { type: string }, { type: integer }, { nullable: true } ]
+        state: { type: string, enum: [idle, active, ending, resetting] }
+        seconds_left: { type: integer }
+        extend_request_at:
+          type: integer
+          format: int64
+          description: Non-zero when the attendee asked for more time. One request per (session, extend_request_at).
+        status:
+          type: object
+          description: Output of `hackbox status --json`, stored as is.
+    Command:
+      type: object
+      required: [id, op, minutes]
+      properties:
+        id: { type: string, example: '12' }
+        op: { type: string, enum: [extend, end] }
+        minutes: { type: integer, description: '1..60 for extend, 0 for end' }
+    HeartbeatResponse:
+      type: object
+      required: [commands, extend]
+      properties:
+        commands:
+          type: array
+          description: Commands for this box not picked before. They are marked picked now. Commands not picked within 120 s are dropped.
+          items: { $ref: '#/components/schemas/Command' }
+        extend:
+          type: object
+          required: [status, minutes]
+          properties:
+            status: { type: string, enum: [none, pending, approved, declined] }
+            minutes: { type: integer, description: 'Approved minutes, 0 otherwise' }
+    CommandResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        message: { type: string }
+    EndRequest:
+      type: object
+      properties:
+        ended_at: { type: integer, format: int64 }
+        reason: { type: string, example: timeout }
+        empty: { type: boolean, description: 'true when there was nothing in ~/project to archive. Ignored if an archive was already uploaded.' }
+    DashRequest:
+      type: object
+      nullable: true
+      properties:
+        id: { type: integer }
+        asked_at: { type: integer, format: int64 }
+        status: { type: string, enum: [pending] }
+        minutes: { type: integer }
+    DashBox:
+      type: object
+      properties:
+        name: { type: string }
+        online: { type: boolean, description: 'last_seen within 15 s' }
+        last_seen: { type: integer, format: int64 }
+        state: { type: string }
+        seconds_left: { type: integer }
+        session_id: { type: string }
+        attendee: { type: string }
+        agent: { type: string }
+        started_at: { type: integer, format: int64 }
+        minutes: { type: integer }
+        extended_minutes: { type: integer }
+        code: { type: string }
+        request: { $ref: '#/components/schemas/DashRequest' }
+        status: { type: object }
+    DashSession:
+      type: object
+      properties:
+        id: { type: string }
+        box: { type: string }
+        name: { type: string }
+        agent: { type: string }
+        code: { type: string }
+        local_code: { type: string }
+        minutes: { type: integer }
+        extended_minutes: { type: integer }
+        started_at: { type: integer, format: int64 }
+        ended_at: { type: integer, format: int64 }
+        duration_seconds: { type: integer }
+        end_reason: { type: string }
+        archive_bytes: { type: integer }
+        empty: { type: boolean }
+        github_status: { type: string, enum: [disabled, queued, pushed, failed] }
+        github_repo: { type: string }
+        github_url: { type: string }
+        github_error: { type: string }
+        download_url: { type: string, description: 'Staff zip link, empty when there is no archive' }
+        public_url: { type: string }
+        expires_at: { type: integer, format: int64 }
+    DashState:
+      type: object
+      properties:
+        now: { type: integer, format: int64 }
+        boxes: { type: array, items: { $ref: '#/components/schemas/DashBox' } }
+        sessions:
+          type: array
+          description: Last 200 sessions, newest first.
+          items: { $ref: '#/components/schemas/DashSession' }
+    CommandQueued:
+      type: object
+      properties:
+        command_id: { type: string }
+
+paths:
+  /api/v1/sessions:
+    post:
+      tags: [box]
+      summary: Register a new session
+      security: [ { boxToken: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSessionRequest' }
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateSessionResponse' }
+        '400': { description: 'Bad JSON or minutes out of range.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/sessions/{id}/qr.png:
+    get:
+      tags: [box]
+      summary: QR code of the session's download URL
+      security: [ { boxToken: [] } ]
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      responses:
+        '200':
+          description: 512x512 PNG.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/heartbeat:
+    post:
+      tags: [box]
+      summary: Box status every 3 s; returns pending commands and the extend status
+      security: [ { boxToken: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HeartbeatRequest' }
+      responses:
+        '200':
+          description: Commands to run and the latest extend request status for the current session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HeartbeatResponse' }
+        '400': { description: 'Bad JSON.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/commands/{id}/result:
+    post:
+      tags: [box]
+      summary: Report how a command went
+      description: A successful `extend` adds its minutes to the session's extended_minutes (once).
+      security: [ { boxToken: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CommandResult' }
+      responses:
+        '200': { $ref: '#/components/responses/Empty' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/sessions/{id}/end:
+    post:
+      tags: [box]
+      summary: Mark a session ended
+      security: [ { boxToken: [] } ]
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EndRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/Empty' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/sessions/{id}/archive:
+    put:
+      tags: [box]
+      summary: Upload ~/project as a .tar.gz
+      description: |
+        Raw body, at most 250 MB. Stored as `<data>/archives/<id>.tar.gz` after the whole
+        gzip and tar stream reads cleanly. A second upload replaces the first. Queues the
+        GitHub push when a token is configured. Only the box that owns the session may upload.
+      security: [ { boxToken: [] } ]
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema: { type: string, format: binary }
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200': { $ref: '#/components/responses/Empty' }
+        '400': { description: 'Not a valid .tar.gz, or the upload broke off.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { description: 'Larger than 250 MB.' }
+
+  /d/{token}:
+    get:
+      tags: [public]
+      summary: Attendee download page
+      description: |
+        HTML. States: preparing (no archive yet; refreshes every 3 s), ready (Download
+        button), empty (nothing new in ~/project), expired (410).
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      responses:
+        '200': { description: 'Preparing, ready or empty page.', content: { text/html: {} } }
+        '404': { description: 'Unknown token page.', content: { text/html: {} } }
+        '410': { description: 'Expired page.', content: { text/html: {} } }
+
+  /d/{token}/download:
+    get:
+      tags: [public]
+      summary: The project as hackbox-<code>.zip
+      description: |
+        Converted on the fly from the stored tarball. Regular files and directories only,
+        all under `<code>-project/`. Symlinks, links, devices and unsafe paths are left out.
+        Before the archive exists it redirects back to the page.
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      responses:
+        '200':
+          description: 'Zip stream, with Content-Disposition attachment; filename="hackbox-<code>.zip".'
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '303': { description: 'Not ready yet; back to /d/{token}.' }
+        '404': { description: 'Unknown token.' }
+        '410': { description: 'Expired.' }
+
+  /code:
+    get:
+      tags: [public]
+      summary: Form to type the 6 character code
+      responses:
+        '200': { description: 'HTML form.', content: { text/html: {} } }
+    post:
+      tags: [public]
+      summary: Look up a code
+      description: Limited to 5 tries per minute per client IP (Cf-Connecting-IP when present).
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                code: { type: string, example: K7MZQ2 }
+      responses:
+        '303': { description: 'Found; Location: /d/{token}' }
+        '400': { description: 'Not 6 characters; form shown again.' }
+        '404': { description: 'No unexpired session with that code; form shown again.' }
+        '429': { description: 'Too many tries page.' }
+
+  /healthz:
+    get:
+      tags: [public]
+      summary: Liveness
+      responses:
+        '200':
+          description: The text `ok`.
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /:
+    get:
+      tags: [dashboard]
+      summary: Dashboard page (self-contained HTML, polls /dash/state every 2 s)
+      responses:
+        '200': { description: 'HTML.', content: { text/html: {} } }
+        '404': { description: 'Came through the tunnel.' }
+
+  /dash/state:
+    get:
+      tags: [dashboard]
+      summary: Boxes and the last 200 sessions
+      responses:
+        '200':
+          description: Current state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashState' }
+
+  /dash/boxes/{box}/extend:
+    post:
+      tags: [dashboard]
+      summary: Queue an extend for a box
+      description: 'Requires Content-Type application/json; a browser Origin must match the Host.'
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minutes]
+              properties:
+                minutes: { type: integer, minimum: 1, maximum: 60 }
+      responses:
+        '200':
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '400': { description: 'minutes out of range.' }
+        '403': { description: 'Cross-origin request.' }
+        '404': { description: 'Unknown box.' }
+        '415': { description: 'Not JSON.' }
+
+  /dash/boxes/{box}/end:
+    post:
+      tags: [dashboard]
+      summary: Queue an end for a box
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '403': { description: 'Cross-origin request.' }
+        '404': { description: 'Unknown box.' }
+        '415': { description: 'Not JSON.' }
+
+  /dash/requests/{id}:
+    post:
+      tags: [dashboard]
+      summary: Approve or decline an extend request
+      description: Approve queues an `extend` with the given minutes (default 5).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approve]
+              properties:
+                approve: { type: boolean }
+                minutes: { type: integer, minimum: 1, maximum: 60 }
+      responses:
+        '200':
+          description: Decided. `command_id` is set when approved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '400': { description: 'minutes out of range.' }
+        '404': { description: 'Unknown request.' }
+        '409': { description: 'Already decided, or the session is no longer on that box.' }
+
+  /dash/sessions/{id}/download:
+    get:
+      tags: [dashboard]
+      summary: Staff download of any session (same zip as the attendee gets, never expires)
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      responses:
+        '200':
+          description: Zip stream.
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '404': { description: 'No archive for that session.' }
+
+  /dash/api_test.html:
+    get:
+      tags: [dashboard]
+      summary: The api_test.html page, served same-origin
+      responses:
+        '200': { description: 'HTML.', content: { text/html: {} } }

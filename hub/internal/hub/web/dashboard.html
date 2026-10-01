@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Hack-box dashboard</title>
+<style>
+:root{
+  --bg:#0a0c11;--panel:#121620;--panel2:#171c28;--line:#242b39;--text:#eef1f7;--muted:#8a94a8;
+  --accent:#9b7bff;--accent2:#6d4dff;--ok:#38d39f;--warn:#ffb547;--bad:#ff6b6b;--info:#5cb8ff;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;padding:14px 22px;background:rgba(10,12,17,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;font-weight:800;font-size:14px;flex:none}
+header h1{font-size:18px;margin:0;font-weight:700}
+header .sub{color:var(--muted);font-size:13px}
+.spacer{flex:1}
+.conn{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--muted);flex:none}
+.dot.on{background:var(--ok);box-shadow:0 0 0 4px rgba(56,211,159,.15)}
+.dot.off{background:var(--bad)}
+main{padding:22px;max-width:1500px;margin:0 auto}
+.summary{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px}
+.chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:14px;color:var(--muted)}
+.chip b{color:var(--text);font-size:16px;margin-right:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px 18px 16px;display:flex;flex-direction:column;gap:12px;transition:border-color .2s}
+.card.offline{opacity:.6}
+.card.asking{border-color:var(--warn);box-shadow:0 0 0 3px rgba(255,181,71,.18)}
+.top{display:flex;align-items:center;gap:10px}
+.boxname{font-size:22px;font-weight:800;letter-spacing:.01em}
+.badge{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:4px 10px;border-radius:999px;background:var(--panel2);color:var(--muted)}
+.badge.active{background:rgba(56,211,159,.14);color:var(--ok)}
+.badge.ending{background:rgba(255,181,71,.14);color:var(--warn)}
+.badge.resetting{background:rgba(92,184,255,.14);color:var(--info)}
+.badge.offline{background:rgba(255,107,107,.14);color:var(--bad)}
+.time{font:800 64px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.time.low{color:var(--warn)}
+.time.out{color:var(--bad)}
+.time.idle{color:var(--line)}
+.who{display:flex;flex-direction:column;gap:2px;min-height:44px}
+.who .name{font-size:19px;font-weight:700}
+.who .meta{color:var(--muted);font-size:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+button{font:inherit;font-weight:700;border-radius:12px;border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:10px 14px;cursor:pointer;min-width:58px}
+button:hover{border-color:var(--accent)}
+button:active{transform:translateY(1px)}
+button:disabled{opacity:.4;cursor:default}
+button.end{margin-left:auto;color:var(--bad);border-color:rgba(255,107,107,.35)}
+button.end:hover{background:rgba(255,107,107,.12);border-color:var(--bad)}
+button.ok{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent;color:#fff}
+button.no{color:var(--muted)}
+.req{background:rgba(255,181,71,.1);border:1px solid rgba(255,181,71,.45);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px}
+.req .t{font-weight:700;color:var(--warn)}
+.req .t span{font-weight:500;color:var(--muted);margin-left:6px}
+.req .row button{padding:9px 10px;min-width:0}
+.req .row button.no{margin-left:auto}
+h2{font-size:16px;margin:34px 0 12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:900px}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em;background:var(--panel2)}
+tr:last-child td{border-bottom:0}
+td.name{font-weight:600;white-space:normal;max-width:220px}
+td.num{font-variant-numeric:tabular-nums}
+a{color:var(--accent)}
+.gh{font-weight:700;font-size:12px;padding:3px 9px;border-radius:999px;background:var(--panel2);color:var(--muted)}
+.gh.pushed{background:rgba(56,211,159,.14);color:var(--ok)}
+.gh.queued{background:rgba(92,184,255,.14);color:var(--info)}
+.gh.failed{background:rgba(255,107,107,.14);color:var(--bad)}
+.muted{color:var(--muted)}
+.empty{color:var(--muted);padding:24px;text-align:center}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(120px);background:var(--panel2);border:1px solid var(--line);padding:12px 18px;border-radius:12px;font-weight:600;transition:transform .25s;z-index:10;max-width:90vw}
+#toast.show{transform:translateX(-50%) translateY(0)}
+#toast.err{border-color:var(--bad);color:var(--bad)}
+@media (max-width:600px){
+  header{padding:12px 14px}
+  main{padding:14px}
+  .time{font-size:54px}
+  .grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">0G</div>
+  <div><h1>Hack-box dashboard</h1><div class="sub" id="clock"></div></div>
+  <div class="spacer"></div>
+  <div class="conn"><span class="dot" id="conndot"></span><span id="conntext">connecting</span></div>
+</header>
+<main>
+  <div class="summary" id="summary"></div>
+  <div class="grid" id="boxes"></div>
+  <h2>History</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Started</th><th>Box</th><th>Name</th><th>Agent</th><th>Code</th><th>Duration</th>
+        <th>End reason</th><th>Size</th><th>GitHub</th><th>Files</th>
+      </tr></thead>
+      <tbody id="hist"></tbody>
+    </table>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+"use strict";
+const $ = (s, el) => (el || document).querySelector(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+let state = null, fetchedAt = 0, histKey = "";
+const cards = {};
+
+function mmss(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+}
+function ago(sec) {
+  if (sec < 60) return Math.max(0, Math.floor(sec)) + "s ago";
+  if (sec < 3600) return Math.floor(sec / 60) + "m ago";
+  return Math.floor(sec / 3600) + "h ago";
+}
+function size(n) {
+  if (!n) return "";
+  if (n >= 1073741824) return (n / 1073741824).toFixed(1) + " GB";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
+}
+function when(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString(undefined, {month: "short", day: "numeric"}) + " " +
+         d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"});
+}
+function toast(msg, err) {
+  const t = $("#toast");
+  t.textContent = msg; t.className = "show" + (err ? " err" : "");
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.className = "", 2600);
+}
+async function post(path, body, okMsg) {
+  try {
+    const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+    toast(okMsg);
+    poll();
+  } catch (e) { toast(e.message, true); }
+}
+
+function makeCard(name) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.innerHTML =
+    '<div class="top"><span class="dot"></span><span class="boxname"></span><span class="spacer"></span><span class="badge"></span></div>' +
+    '<div class="time idle">--:--</div>' +
+    '<div class="who"><span class="name"></span><span class="meta"></span></div>' +
+    '<div class="reqslot"></div>' +
+    '<div class="row">' +
+      '<button data-x="5">+5</button><button data-x="10">+10</button><button data-x="15">+15</button>' +
+      '<button class="end">End</button>' +
+    '</div>';
+  $(".boxname", el).textContent = name;
+  el.querySelectorAll("button[data-x]").forEach(b => b.onclick = () =>
+    post("/dash/boxes/" + encodeURIComponent(name) + "/extend", {minutes: +b.dataset.x}, "Extend +" + b.dataset.x + " sent to " + name));
+  $(".end", el).onclick = () => {
+    if (confirm("End the session on " + name + " now?")) post("/dash/boxes/" + encodeURIComponent(name) + "/end", {}, "End sent to " + name);
+  };
+  el._req = null;
+  return el;
+}
+
+function renderReq(el, b) {
+  const id = b.request ? b.request.id : null;
+  el.classList.toggle("asking", !!id);
+  if (el._req === id) {
+    if (id) $(".req .t span", el).textContent = ago(state.now - b.request.asked_at);
+    return;
+  }
+  el._req = id;
+  const slot = $(".reqslot", el);
+  if (!id) { slot.innerHTML = ""; return; }
+  slot.innerHTML =
+    '<div class="req"><div class="t">Asking for more time<span></span></div><div class="row">' +
+    '<button class="ok" data-m="5">Approve +5</button><button class="ok" data-m="10">+10</button><button class="ok" data-m="15">+15</button>' +
+    '<button class="no">Decline</button></div></div>';
+  $(".req .t span", slot).textContent = ago(state.now - b.request.asked_at);
+  slot.querySelectorAll("button[data-m]").forEach(btn => btn.onclick = () =>
+    post("/dash/requests/" + id, {approve: true, minutes: +btn.dataset.m}, "Approved +" + btn.dataset.m + " for " + b.name));
+  $(".no", slot).onclick = () => post("/dash/requests/" + id, {approve: false}, "Declined for " + b.name);
+}
+
+function render() {
+  if (!state) return;
+  const grid = $("#boxes");
+  let online = 0, active = 0, asking = 0;
+  state.boxes.forEach(b => {
+    let el = cards[b.name];
+    if (!el) { el = cards[b.name] = makeCard(b.name); grid.appendChild(el); }
+    if (b.online) online++;
+    if (b.online && b.state === "active") active++;
+    if (b.request) asking++;
+    el.classList.toggle("offline", !b.online);
+    $(".top .dot", el).className = "dot " + (b.online ? "on" : "off");
+    const badge = $(".badge", el);
+    const st = b.online ? (b.state || "unknown") : "offline";
+    badge.textContent = st; badge.className = "badge " + st;
+    const who = b.session_id && b.state !== "idle";
+    $(".who .name", el).textContent = who ? (b.attendee || "anonymous") : (b.online ? "Waiting for an attendee" : "No heartbeat");
+    $(".who .meta", el).textContent = who
+      ? [b.agent, b.code, b.extended_minutes ? "+" + b.extended_minutes + " min" : ""].filter(Boolean).join(" · ")
+      : (b.last_seen ? "last seen " + ago(state.now - b.last_seen) : "never seen");
+    el.querySelectorAll(".row > button").forEach(btn => btn.disabled = !b.online);
+    renderReq(el, b);
+    el._b = b;
+  });
+  $("#summary").innerHTML =
+    '<span class="chip"><b>' + online + '</b>online of ' + state.boxes.length + '</span>' +
+    '<span class="chip"><b>' + active + '</b>in session</span>' +
+    (asking ? '<span class="chip" style="color:var(--warn);border-color:rgba(255,181,71,.45)"><b>' + asking + '</b>asking for time</span>' : "") +
+    '<span class="chip"><b>' + state.sessions.length + '</b>sessions shown</span>';
+  tick();
+  renderHistory();
+}
+
+function tick() {
+  if (!state) return;
+  const drift = (Date.now() - fetchedAt) / 1000;
+  Object.values(cards).forEach(el => {
+    const b = el._b; if (!b) return;
+    const t = $(".time", el);
+    if (b.online && (b.state === "active" || b.state === "ending")) {
+      const left = b.state === "active" ? b.seconds_left - drift : 0;
+      t.textContent = mmss(left);
+      t.className = "time" + (left <= 0 ? " out" : left <= 300 ? " low" : "");
+    } else {
+      t.textContent = "--:--"; t.className = "time idle";
+    }
+  });
+  $("#clock").textContent = new Date().toLocaleTimeString();
+}
+
+function renderHistory() {
+  const key = JSON.stringify(state.sessions);
+  if (key === histKey) return;
+  histKey = key;
+  const tb = $("#hist");
+  if (!state.sessions.length) { tb.innerHTML = '<tr><td colspan="10" class="empty">No sessions yet</td></tr>'; return; }
+  tb.innerHTML = state.sessions.map(s => {
+    const planned = s.minutes + s.extended_minutes;
+    const dur = s.ended_at ? mmss(s.duration_seconds) : '<span class="muted">running</span>';
+    const ext = s.extended_minutes ? ' <span class="muted">(' + planned + ' min, +' + s.extended_minutes + ')</span>' : ' <span class="muted">(' + planned + ' min)</span>';
+    let gh = '<span class="gh ' + esc(s.github_status) + '"' + (s.github_error ? ' title="' + esc(s.github_error) + '"' : "") + '>' + esc(s.github_status || "-") + '</span>';
+    if (s.github_url) gh = '<a href="' + esc(s.github_url) + '" target="_blank" rel="noopener">' + gh + '</a>';
+    const files = s.download_url ? '<a href="' + esc(s.download_url) + '">zip</a>' : (s.empty ? '<span class="muted">empty</span>' : '<span class="muted">-</span>');
+    return '<tr><td>' + esc(when(s.started_at)) + '</td><td>' + esc(s.box) + '</td><td class="name">' + esc(s.name || "anonymous") +
+      '</td><td>' + esc(s.agent) + '</td><td><code>' + esc(s.code) + '</code></td><td class="num">' + dur + ext +
+      '</td><td>' + esc(s.end_reason) + '</td><td class="num">' + esc(size(s.archive_bytes)) + '</td><td>' + gh + '</td><td>' + files + '</td></tr>';
+  }).join("");
+}
+
+let polling = false;
+async function poll() {
+  if (polling) return;
+  polling = true;
+  try {
+    const r = await fetch("/dash/state", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    state = await r.json();
+    fetchedAt = Date.now();
+    $("#conndot").className = "dot on"; $("#conntext").textContent = "live";
+    render();
+  } catch (e) {
+    $("#conndot").className = "dot off"; $("#conntext").textContent = "hub unreachable";
+  } finally { polling = false; }
+}
+poll();
+setInterval(poll, 2000);
+setInterval(tick, 250);
+</script>
+</body>
+</html>
