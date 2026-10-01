@@ -142,6 +142,10 @@ Follow one from the Mac (it waits until the box is on the tailnet):
   `/opt/0g-agent-skills` (fresh homes pick it up at the next reset).
 - A dead box: replace it, install it from the same stick. A new machine gets the next free
   number; to give it the dead box's name, press Release name on the dead box's card first.
+  Release only a box that is really gone: it revokes the box's token. A box that is still
+  provisioning shows "Installing" and cannot be released (it reports to the hub only at the
+  end of provisioning). If a live box was released anyway, give it a token again:
+  `ssh hackboxN hackbox hub set <hub url> <HUB_TOKEN_hackboxN from .env>`.
 
 ## Update a running box (no reinstall)
 

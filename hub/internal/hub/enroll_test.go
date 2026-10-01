@@ -302,3 +302,21 @@ func TestDashboardRefusedFromBoxAddress(t *testing.T) {
 		t.Errorf("after 24 h: %d", w.Code)
 	}
 }
+
+// A box that enrolled but has not sent a heartbeat is still provisioning: releasing it then
+// would revoke the token it is about to use (seen on hackbox2, 2026-10-01).
+func TestReleaseRefusedWhileInstalling(t *testing.T) {
+	e := enrollEnv(t)
+	enroll(e, mac(7), "100.64.0.7")
+	rel := func() int {
+		return e.do("POST", "/dash/boxes/hackbox1/release", map[string]any{}, nil).Code
+	}
+	e.clk.Add(20 * time.Minute)
+	if c := rel(); c != 409 {
+		t.Fatalf("release of an installing box: %d, want 409", c)
+	}
+	e.clk.Add(3 * time.Hour)
+	if c := rel(); c != 200 {
+		t.Fatalf("release of a box that never came up after 3 h: %d, want 200", c)
+	}
+}

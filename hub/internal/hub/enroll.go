@@ -27,6 +27,11 @@ var macRe = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
 // releaseQuiet: a name can be released only after this long without a heartbeat.
 const releaseQuiet = 5 * 60
 
+// installWindow: a box that enrolled but has not sent a heartbeat yet is still installing
+// (provisioning takes 15 to 40 minutes); its name cannot be released for this long, or the
+// box would come up with a revoked token.
+const installWindow = 3 * 3600
+
 // boxIPTTL: how long an address that made a box API call is kept off the dashboard.
 const boxIPTTL = 24 * time.Hour
 
@@ -194,9 +199,14 @@ func (s *Server) dashRelease(w http.ResponseWriter, r *http.Request) {
 		hasRow = false
 	}
 	var mac string
-	enrolled := s.db.QueryRow(`SELECT mac FROM enrollments WHERE name = ?`, box).Scan(&mac) == nil
+	var enrolledAt int64
+	enrolled := s.db.QueryRow(`SELECT mac, enrolled_at FROM enrollments WHERE name = ?`, box).Scan(&mac, &enrolledAt) == nil
 	if !hasRow && !enrolled {
 		jsonError(w, http.StatusNotFound, "no such box name in use")
+		return
+	}
+	if enrolled && lastSeen == 0 && s.now().Unix()-enrolledAt < installWindow {
+		jsonError(w, http.StatusConflict, box+" enrolled recently and is still installing; it shows up when provisioning is done")
 		return
 	}
 	if s.now().Unix()-lastSeen < releaseQuiet {

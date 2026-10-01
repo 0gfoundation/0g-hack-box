@@ -270,16 +270,20 @@ function render() {
     const st = b.online ? (b.state || "unknown") : "offline";
     badge.textContent = st; badge.className = "badge " + st;
     const who = b.session_id && b.state !== "idle";
-    $(".who .name", el).textContent = who ? (b.attendee || "anonymous") : (b.online ? "Waiting for an attendee" : "No heartbeat");
+    // Enrolled but never heard from: provisioning is still running (it reports at the end).
+    const installing = !b.online && b.enrolled && !b.last_seen && state.now - b.enrolled_at < 3 * 3600;
+    $(".who .name", el).textContent = who ? (b.attendee || "anonymous")
+      : (b.online ? "Waiting for an attendee" : (installing ? "Installing" : "No heartbeat"));
     $(".who .email", el).textContent = who ? (b.email || "") : "";
     el.classList.toggle("ending", b.online && b.state === "ending");
     $(".who .meta", el).textContent = who
       ? [b.agent, b.code, b.extended_minutes ? "+" + b.extended_minutes + " min" : ""].filter(Boolean).join(" · ")
-      : (b.last_seen ? "last seen " + ago(state.now - b.last_seen) : "never seen");
+      : (installing ? "enrolled " + ago(state.now - b.enrolled_at) + ", provisioning"
+        : (b.last_seen ? "last seen " + ago(state.now - b.last_seen) : "never seen"));
     el.querySelectorAll(".row > button").forEach(btn => btn.disabled = !b.online);
     $(".act", el).textContent = b.online && b.state !== "idle" ? (b.activity || []).join(" · ") : "";
     const rr = $(".relrow", el);
-    rr.classList.toggle("can", !b.online && (b.enrolled || b.last_seen > 0));
+    rr.classList.toggle("can", !b.online && !installing && (b.enrolled || b.last_seen > 0));
     $(".relinfo", rr).textContent = b.enrolled ? "MAC " + b.mac : "";
     renderReq(el, b);
     const k = $(".keys", el);
