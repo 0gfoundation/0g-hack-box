@@ -169,6 +169,9 @@ type heartbeatReq struct {
 	// AppliedConfigVersion is the config version the box last applied.
 	// Omitted means "unchanged".
 	AppliedConfigVersion *string `json:"applied_config_version"`
+	// Activity is the friendly names of the programs the attendee runs.
+	// Invalid entries are dropped; it is cleared when the box is idle.
+	Activity json.RawMessage `json:"activity"`
 }
 
 type commandOut struct {
@@ -210,11 +213,17 @@ func (s *Server) apiHeartbeat(w http.ResponseWriter, r *http.Request, box string
 	if len(req.Status) > 0 && json.Valid(req.Status) && len(req.Status) < 64<<10 {
 		status = string(req.Status)
 	}
-	_, err := s.db.Exec(`INSERT INTO boxes (name, last_seen, state, seconds_left, status_json, session_id)
-		VALUES (?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET last_seen=excluded.last_seen,
+	state := cleanText(req.State, 20)
+	activity := cleanActivity(req.Activity)
+	if state == "idle" {
+		activity = []string{}
+	}
+	actJSON, _ := json.Marshal(activity)
+	_, err := s.db.Exec(`INSERT INTO boxes (name, last_seen, state, seconds_left, status_json, session_id, activity_json)
+		VALUES (?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET last_seen=excluded.last_seen,
 		state=excluded.state, seconds_left=excluded.seconds_left, status_json=excluded.status_json,
-		session_id=excluded.session_id`,
-		box, now, cleanText(req.State, 20), req.SecondsLeft, status, sid)
+		session_id=excluded.session_id, activity_json=excluded.activity_json`,
+		box, now, state, req.SecondsLeft, status, sid, string(actJSON))
 	if err != nil {
 		s.serverError(w, err)
 		return

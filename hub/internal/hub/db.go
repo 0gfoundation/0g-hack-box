@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS commands (
 );
 CREATE INDEX IF NOT EXISTS commands_box ON commands(box, picked_at);
 
+CREATE TABLE IF NOT EXISTS enrollments (
+  mac              TEXT PRIMARY KEY,
+  name             TEXT NOT NULL UNIQUE,
+  token            TEXT NOT NULL UNIQUE,
+  enrolled_at      INTEGER NOT NULL,
+  current_hostname TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS config (
   scope      TEXT NOT NULL,
   name       TEXT NOT NULL,
@@ -85,6 +93,7 @@ CREATE TABLE IF NOT EXISTS config (
 // column" error means the column is already there.
 var migrations = []string{
 	`ALTER TABLE boxes ADD COLUMN applied_config_version TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE boxes ADD COLUMN activity_json TEXT NOT NULL DEFAULT '[]'`,
 }
 
 func openDB(dataDir string) (*sql.DB, error) {

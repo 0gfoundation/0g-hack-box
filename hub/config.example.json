@@ -4,5 +4,7 @@
     "devtoken": "hackbox1"
   },
   "github": {"org": "0g-hackbox-sessions", "token": ""},
-  "download_days": 7
+  "download_days": 7,
+  "enroll_token": "",
+  "name_prefix": "hackbox"
 }

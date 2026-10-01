@@ -4,7 +4,10 @@
 # ask for on first launch:
 #   ~/.claude.json           onboarding done, ~/project trusted (so no trust dialog)
 #   ~/.claude/settings.json  dark theme (no theme picker)
-#   ~/.config/opencode/      created empty; OpenCode needs nothing else (config is managed)
+#   ~/.config/opencode/      OpenCode needs no config here (it is managed), only AGENTS.md:
+#   ~/.claude/CLAUDE.md and ~/.config/opencode/AGENTS.md
+#                            point both agents at the 0G agent skills in /opt/0g-agent-skills
+#                            (when present), so they know the 0G stack from the first prompt
 #   ~/.config/hackbox/env    when opencode or claude-0g is offered: ZG_ROUTER_API_KEY,
 #                            OG_ROUTER_URL and OG_MODEL for the attendee's own code (the
 #                            starter kit's compute example reads them), sourced by a guarded
@@ -70,6 +73,25 @@ with open(spath, "w") as fh:
 PY
 
 mkdir -p "$home/.config/opencode" "$home/.config/hackbox"
+
+# 0G agent skills: one global instruction for each agent (the build.0g.ai installer's line,
+# with the shared copy instead of a per-project clone).
+skills=/opt/0g-agent-skills
+if [ -r "$skills/CLAUDE.md" ]; then
+  for pair in "CLAUDE.md:$home/.claude/CLAUDE.md" "AGENTS.md:$home/.config/opencode/AGENTS.md"; do
+    src=${pair%%:*} dst=${pair#*:}
+    cat > "$dst" <<EOF
+# Building on 0G
+
+This machine is for building on 0G. For anything 0G (storage, compute, chain, Agentic ID,
+private computer), read and follow $skills/$src first. The skills are in
+$skills/skills/, the deeper patterns in $skills/patterns/ and working examples in
+$skills/examples/. Use them before guessing package names, versions or APIs.
+EOF
+  done
+else
+  log "no 0G agent skills in $skills (run: hackbox skills update)"
+fi
 
 # Router environment for the attendee's own code (A2).
 envf="$home/.config/hackbox/env"

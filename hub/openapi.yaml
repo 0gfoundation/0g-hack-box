@@ -16,6 +16,13 @@ info:
     Tunnel guard: any request to `/`, `/dash/*` or `/api/*` that carries a
     `Cf-Connecting-IP` header gets 404, so a tunnel misconfiguration cannot publish them.
 
+    Box address guard: a TCP peer address that made an authenticated box API call (box
+    token, enrolled token or enroll token) in the last 24 h gets 403 on `/` and `/dash/*`.
+    Loopback is exempt. The list is kept in memory.
+
+    Box tokens are the `boxes` map of the config plus the tokens handed out by
+    POST /api/v1/enroll. The fleet enroll token is accepted only by /api/v1/enroll.
+
     Times are Unix seconds. JSON in and out unless noted.
 servers:
   - url: http://localhost:8210
@@ -101,6 +108,15 @@ components:
         status:
           type: object
           description: Output of `hackbox status --json`, stored as is.
+        activity:
+          type: array
+          maxItems: 12
+          description: |
+            Optional. Friendly names of the programs the attendee runs. Entries that are not
+            strings of 1 to 32 printable characters are dropped; at most 12 are kept. Replaces
+            the stored list on every heartbeat (omitted means empty); cleared when state is idle.
+          items: { type: string, minLength: 1, maxLength: 32 }
+          example: [Terminal, OpenCode, Chromium]
         applied_config_version:
           type: string
           description: Optional. The config version the box last applied ("" for none). Omitted leaves the stored value unchanged.
@@ -232,6 +248,10 @@ components:
         request: { $ref: '#/components/schemas/DashRequest' }
         config_version: { type: string, description: The agent config version the hub wants on this box. }
         applied_config_version: { type: string, description: The version the box last reported applying. }
+        activity: { type: array, items: { type: string }, description: 'Programs open on the box, [] when idle or never reported.' }
+        enrolled: { type: boolean, description: The name came from POST /api/v1/enroll. }
+        mac: { type: string, description: 'Bound MAC for enrolled boxes, else ""' }
+        enrolled_at: { type: integer, format: int64 }
         config_up_to_date: { type: boolean, description: 'config_version == applied_config_version ("keys up to date", else "keys pending, applies at next idle")' }
         status: { type: object }
     DashSession:
@@ -267,6 +287,18 @@ components:
           type: array
           description: Last 200 sessions, newest first.
           items: { $ref: '#/components/schemas/DashSession' }
+    EnrollRequest:
+      type: object
+      required: [mac]
+      properties:
+        mac: { type: string, pattern: '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$', description: 'Lowercased by the hub before checking.', example: 'aa:bb:cc:dd:ee:ff' }
+        current_hostname: { type: string, example: hackbox-eeff }
+    EnrollResponse:
+      type: object
+      required: [name, token]
+      properties:
+        name: { type: string, example: hackbox2 }
+        token: { type: string, description: 'New box token, 40 lowercase base32 chars. Use as Bearer for every other box call.', pattern: '^[a-z2-7]{40}$' }
     CommandQueued:
       type: object
       properties:
@@ -403,6 +435,32 @@ paths:
               schema: { $ref: '#/components/schemas/BoxConfig' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /api/v1/enroll:
+    post:
+      tags: [box]
+      summary: Get a box name and token with the fleet enroll token
+      description: |
+        Bearer is the config `enroll_token` (and only here). The same MAC always gets the same
+        name back, with a new token; the old enrolled token stops working. A new MAC gets the
+        lowest free `<name_prefix>N` (N >= 1): a name is taken when it is bound to a MAC or has
+        ever sent a heartbeat. Names that only exist as unused config tokens are free and get
+        bound. Limited to 10 calls per minute per client address, counting failed ones.
+      security: [ { boxToken: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollRequest' }
+      responses:
+        '200':
+          description: Enrolled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollResponse' }
+        '400': { description: 'Bad JSON or MAC.' }
+        '401': { description: 'Missing or wrong enroll token, or enrollment is off (no enroll_token in the config).' }
+        '429': { description: 'More than 10 calls in a minute from this address.' }
+
   /d/{token}:
     get:
       tags: [public]
@@ -536,6 +594,34 @@ paths:
         '403': { description: 'Cross-origin request.' }
         '404': { description: 'Unknown box.' }
         '415': { description: 'Not JSON.' }
+
+  /dash/boxes/{box}/release:
+    post:
+      tags: [dashboard]
+      summary: Release a dead box's name
+      description: |
+        Removes the MAC binding and the enrolled token for that name, its heartbeat record and
+        its unpicked commands, so the next new box can take the name. Agent key overrides for
+        the name are kept. Same guards as the other dashboard POSTs.
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Released. `revoked` is true when an enrolled token was removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  released: { type: string }
+                  revoked: { type: boolean }
+        '404': { description: 'The name is neither enrolled nor has a heartbeat record.' }
+        '409': { description: 'The box sent a heartbeat in the last 5 minutes.' }
 
   /dash/requests/{id}:
     post:

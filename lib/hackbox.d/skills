@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# hackbox-help: 0G agent skills: update | status
+set -euo pipefail
+DIR=/opt/0g-agent-skills
+case "${1:-status}" in
+  update) sudo /usr/local/sbin/hackbox-skills-update
+          echo "fresh homes point at it from the next reset (hackbox reset on an idle box)" ;;
+  status) if sudo test -d "$DIR/.git"; then echo "0G agent skills: $(sudo git -C "$DIR" log -1 --format='%h %cs') in $DIR"
+          else echo "0G agent skills: not installed (hackbox skills update)"; fi ;;
+  *) echo "usage: hackbox skills update | status" >&2; exit 2 ;;
+esac

@@ -193,8 +193,7 @@ func (s *Server) dashConfigState() (dashConfigResp, error) {
 	if err != nil {
 		return dashConfigResp{}, err
 	}
-	boxes := s.cfg.boxNames()
-	sort.Slice(boxes, func(i, j int) bool { return naturalLess(boxes[i], boxes[j]) })
+	boxes := s.allBoxNames()
 	resp := dashConfigResp{KnownAgents: knownAgents, Scopes: []dashConfigScope{}}
 	for _, scope := range append([]string{scopeAll}, boxes...) {
 		sc := dashConfigScope{Scope: scope, Names: map[string]dashConfigName{}, Agents: []string{}, EffectiveAgents: []string{}}

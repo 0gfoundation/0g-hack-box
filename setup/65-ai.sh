@@ -8,6 +8,8 @@
 #   /usr/local/lib/hackbox/ai/key         Claude Code apiKeyHelper
 #   /usr/local/bin/hackbox-agent          the manifest's launch command
 #   /etc/hackbox/reset.d/50-ai-seed       seeds agent state into every fresh home
+#   /opt/0g-agent-skills                  the 0G agent skills, which every fresh home's
+#                                         ~/.claude/CLAUDE.md and opencode AGENTS.md point at
 # then renders the configs for the saved selection (first run: AGENTS_DEFAULT).
 # Keys are set separately: `hackbox secret set <name>`. Without them the box still works
 # and the welcome screen's agent buttons print a "please ask staff" line.
@@ -47,7 +49,14 @@ sudo install -m 0755 "$A/hackbox-ai-render" /usr/local/sbin/hackbox-ai-render
 sudo install -m 0755 "$A/key" /usr/local/lib/hackbox/ai/key
 sudo install -m 0755 "$A/hackbox-agent" /usr/local/bin/hackbox-agent
 sudo install -m 0755 "$A/50-ai-seed" /etc/hackbox/reset.d/50-ai-seed
-chmod 0755 "$HERE/lib/hackbox.d/agents" "$HERE/lib/hackbox.d/secret" "$HERE/lib/hackbox.d/lock" 2>/dev/null || true
+sudo install -m 0755 "$A/hackbox-skills-update" /usr/local/sbin/hackbox-skills-update
+# 0G agent skills (refresh later with `hackbox skills update`). A network hiccup here must
+# not fail the install: the agents then simply have no 0G pointers until the next update.
+if [ ! -d /opt/0g-agent-skills ] || [ -n "${HACKBOX_SKILLS_REFRESH:-}" ]; then
+  sudo /usr/local/sbin/hackbox-skills-update || echo "warn: could not fetch the 0G agent skills; run: hackbox skills update" >&2
+fi
+chmod 0755 "$HERE/lib/hackbox.d/agents" "$HERE/lib/hackbox.d/secret" "$HERE/lib/hackbox.d/lock" \
+  "$HERE/lib/hackbox.d/skills" 2>/dev/null || true
 
 # Render for the saved selection, or the default on a fresh box. A rerun of bootstrap
 # keeps whatever staff chose with `hackbox agents set`.

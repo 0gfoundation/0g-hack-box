@@ -13,6 +13,11 @@ type Config struct {
 	Boxes         map[string]string `json:"boxes"` // box token -> box name
 	GitHub        GitHubConfig      `json:"github"`
 	DownloadDays  int               `json:"download_days"`
+	// EnrollToken lets a box with the fleet stick ask for a name and its own
+	// token (POST /api/v1/enroll). Empty turns enrollment off.
+	EnrollToken string `json:"enroll_token"`
+	// NamePrefix is the stem of enrolled box names: <prefix>1, <prefix>2, ...
+	NamePrefix string `json:"name_prefix"`
 }
 
 // GitHubConfig names the org that receives one private repo per session.
@@ -45,6 +50,15 @@ func (c *Config) normalize() error {
 	}
 	if c.GitHub.Org == "" {
 		c.GitHub.Org = "0g-hackbox-sessions"
+	}
+	if c.NamePrefix == "" {
+		c.NamePrefix = "hackbox"
+	}
+	if c.EnrollToken != "" && len(c.EnrollToken) < 16 {
+		return fmt.Errorf("config: enroll_token must be at least 16 characters")
+	}
+	if _, clash := c.Boxes[c.EnrollToken]; clash && c.EnrollToken != "" {
+		return fmt.Errorf("config: enroll_token must not also be a box token")
 	}
 	if c.Boxes == nil {
 		c.Boxes = map[string]string{}

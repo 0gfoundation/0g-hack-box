@@ -54,7 +54,10 @@ type Server struct {
 	loc        *time.Location
 	apiTest    []byte
 	limiter    *rateLimiter
-	gh         *githubWorker
+	// enrollLimiter caps POST /api/v1/enroll per client address.
+	enrollLimiter *rateLimiter
+	boxIPs        *boxIPSet
+	gh            *githubWorker
 }
 
 // New opens the database under DataDir and returns a ready Server.
@@ -96,6 +99,8 @@ func New(o Options) (*Server, error) {
 	}
 	s.db = db
 	s.limiter = newRateLimiter(5, time.Minute, s.now)
+	s.enrollLimiter = newRateLimiter(10, time.Minute, s.now)
+	s.boxIPs = newBoxIPSet(s.now)
 	s.gh = newGitHubWorker(s, o.GitHubAPI, o.GitHubPush, o.GitCmd)
 	if err := s.gh.requeueDisabled(); err != nil {
 		db.Close()
@@ -122,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/end", s.boxAuth(s.apiEnd))
 	mux.HandleFunc("PUT /api/v1/sessions/{id}/archive", s.boxAuth(s.apiArchive))
 	mux.HandleFunc("GET /api/v1/config", s.boxAuth(s.apiConfig))
+	mux.HandleFunc("POST /api/v1/enroll", s.apiEnroll)
 
 	// Public pages (the only paths the tunnel should carry).
 	mux.HandleFunc("GET /d/{token}", s.pageDownload)
@@ -139,12 +145,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dash/boxes/{box}/extend", s.dashGuard(s.dashExtend))
 	mux.HandleFunc("POST /dash/boxes/{box}/end", s.dashGuard(s.dashEnd))
 	mux.HandleFunc("POST /dash/requests/{id}", s.dashGuard(s.dashDecide))
+	mux.HandleFunc("POST /dash/boxes/{box}/release", s.dashGuard(s.dashRelease))
 	mux.HandleFunc("GET /dash/sessions/{id}/download", s.dashDownload)
 	mux.HandleFunc("GET /dash/api_test.html", s.dashAPITest)
 	mux.HandleFunc("GET /dash/config", s.dashConfigGet)
 	mux.HandleFunc("POST /dash/config", s.dashGuard(s.dashConfigSet))
 
-	return s.logRequests(tunnelGuard(mux))
+	return s.logRequests(tunnelGuard(s.dashboardGuard(mux)))
 }
 
 // tunnelGuard refuses the dashboard and the box API to anything that came
@@ -221,7 +228,8 @@ func logPath(p string) string {
 	return p
 }
 
-// boxAuth maps the bearer token to a box name, or answers 401.
+// boxAuth maps the bearer token to a box name, or answers 401. Config tokens
+// and enrolled tokens count; the enroll token does not.
 func (s *Server) boxAuth(h func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
@@ -234,11 +242,15 @@ func (s *Server) boxAuth(h func(http.ResponseWriter, *http.Request, string)) htt
 				}
 			}
 		}
+		if box == "" && ok && tok != "" {
+			box = s.enrolledBox(tok)
+		}
 		if box == "" {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="hackbox-hub"`)
 			jsonError(w, http.StatusUnauthorized, "unknown box token")
 			return
 		}
+		s.boxIPs.see(r)
 		h(w, r, box)
 	}
 }

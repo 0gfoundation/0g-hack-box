@@ -94,13 +94,24 @@ func (e *env) do(method, path string, body any, h hdr) *httptest.ResponseRecorde
 		r = bytes.NewReader(j)
 	}
 	req := httptest.NewRequest(method, path, r)
+	// Boxes call from 192.0.2.10; staff use the dashboard from 192.0.2.50, since
+	// the hub refuses the dashboard to addresses that made box API calls.
 	req.RemoteAddr = "192.0.2.10:5555"
+	if isPrivatePath(path) && !strings.HasPrefix(path, "/api/") {
+		req.RemoteAddr = "192.0.2.50:5555"
+	}
+	if ra, ok := h["X-Test-Remote"]; ok {
+		req.RemoteAddr = ra
+	}
 	if body != nil {
 		if _, raw := body.([]byte); !raw {
 			req.Header.Set("Content-Type", "application/json")
 		}
 	}
 	for k, v := range h {
+		if k == "X-Test-Remote" {
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	w := httptest.NewRecorder()

@@ -361,7 +361,9 @@ class FullScreen(Gtk.Window):
                              "hb-muted"), False, False, 20)
         if self.app.hub:
             box.pack_start(label("When time is up you get a QR code to download your project. "
-                                 "A copy is kept privately by the organisers.", "hb-muted",
+                                 "A copy is kept privately by the organisers.\n"
+                                 "Staff can see your name, your time and which apps are open "
+                                 "(names only, never what is in them).", "hb-muted",
                                  wrap=True), False, False, 0)
         self._name_changed()
         return box

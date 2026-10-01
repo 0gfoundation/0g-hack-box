@@ -56,10 +56,16 @@ type dashBox struct {
 	Request         *dashRequest `json:"request"`
 	// ConfigVersion is what the hub wants, AppliedConfigVersion what the box
 	// last reported. Equal means the keys on the box are up to date.
-	ConfigVersion        string          `json:"config_version"`
-	AppliedConfigVersion string          `json:"applied_config_version"`
-	ConfigUpToDate       bool            `json:"config_up_to_date"`
-	Status               json.RawMessage `json:"status"`
+	ConfigVersion        string `json:"config_version"`
+	AppliedConfigVersion string `json:"applied_config_version"`
+	ConfigUpToDate       bool   `json:"config_up_to_date"`
+	// Activity: friendly names of the programs open on the box, [] when idle.
+	Activity []string `json:"activity"`
+	// Enrolled boxes got their name from POST /api/v1/enroll.
+	Enrolled   bool            `json:"enrolled"`
+	MAC        string          `json:"mac"`
+	EnrolledAt int64           `json:"enrolled_at"`
+	Status     json.RawMessage `json:"status"`
 }
 
 type dashSession struct {
@@ -97,18 +103,19 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 	resp := dashStateResp{Now: now, Boxes: []dashBox{}, Sessions: []dashSession{}}
 
 	boxes := map[string]*dashBox{}
-	for _, n := range s.cfg.boxNames() {
-		boxes[n] = &dashBox{Name: n, Status: json.RawMessage("{}")}
+	for _, n := range s.allBoxNames() {
+		boxes[n] = &dashBox{Name: n, Status: json.RawMessage("{}"), Activity: []string{}}
 	}
-	rows, err := s.db.Query(`SELECT name, last_seen, state, seconds_left, status_json, session_id, applied_config_version FROM boxes`)
+	rows, err := s.db.Query(`SELECT name, last_seen, state, seconds_left, status_json, session_id,
+		applied_config_version, activity_json FROM boxes`)
 	if err != nil {
 		s.serverError(w, err)
 		return
 	}
 	for rows.Next() {
 		var b dashBox
-		var st string
-		if err := rows.Scan(&b.Name, &b.LastSeen, &b.State, &b.SecondsLeft, &st, &b.SessionID, &b.AppliedConfigVersion); err != nil {
+		var st, act string
+		if err := rows.Scan(&b.Name, &b.LastSeen, &b.State, &b.SecondsLeft, &st, &b.SessionID, &b.AppliedConfigVersion, &act); err != nil {
 			rows.Close()
 			s.serverError(w, err)
 			return
@@ -116,6 +123,9 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 		b.Status = json.RawMessage(st)
 		if !json.Valid(b.Status) {
 			b.Status = json.RawMessage("{}")
+		}
+		if json.Unmarshal([]byte(act), &b.Activity) != nil || b.Activity == nil {
+			b.Activity = []string{}
 		}
 		b.Online = now-b.LastSeen <= onlineWindow
 		bb := b
@@ -131,7 +141,15 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	enr, err := s.enrollments()
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
 	for _, b := range boxes {
+		if e, ok := enr[b.Name]; ok {
+			b.Enrolled, b.MAC, b.EnrolledAt = true, e.MAC, e.At
+		}
 		b.ConfigVersion = versions[b.Name]
 		b.ConfigUpToDate = b.ConfigVersion == b.AppliedConfigVersion
 		if b.SessionID != "" {
@@ -198,7 +216,7 @@ func splitNum(s string) (string, int) {
 }
 
 func (s *Server) knownBox(name string) bool {
-	for _, n := range s.cfg.Boxes {
+	for _, n := range s.allBoxNames() {
 		if n == name {
 			return true
 		}

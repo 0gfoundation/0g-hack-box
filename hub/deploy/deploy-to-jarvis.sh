@@ -81,6 +81,8 @@ if $SSH "test -f ${CONFIG}"; then
   $SSH "chmod 600 ${CONFIG}"
 else
   BOXES="${HUB_BOXES:-hackbox1 hackbox2 hackbox3}"
+  ENROLL=$(openssl rand -hex 24)
+  echo "fleet enroll token (put it in the build .env): HUB_ENROLL_TOKEN=${ENROLL}"
   ENTRIES=""
   echo "new config: one random token per box. Put each in that box with:"
   for b in ${BOXES}; do
@@ -95,7 +97,9 @@ else
   "boxes": {${ENTRIES}
   },
   "github": {"org": "0g-hackbox-sessions", "token": ""},
-  "download_days": 7
+  "download_days": 7,
+  "enroll_token": "${ENROLL}",
+  "name_prefix": "hackbox"
 }
 JSON
   $SSH "chmod 600 ${CONFIG}"

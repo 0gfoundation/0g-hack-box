@@ -32,6 +32,7 @@ pre{background:#0e1118;border:1px solid var(--line);border-radius:8px;padding:10
 <h1>Hack-box hub API test</h1>
 <p class="note">Exercises the box API (<code>/api/v1/*</code>, bearer token) and the dashboard API (<code>/dash/*</code>).
 The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-origin. Opened as a file, the browser blocks the calls (no CORS).</p>
+<p class="note"><b>Careful:</b> a successful box call (box token or enroll token) marks your address as a box, and the hub then refuses the dashboard and this page to it for 24 hours (403), until the hub restarts. Only <code>localhost</code> is exempt. Run box calls from the hub host itself, or from a machine you do not need the dashboard on.</p>
 
 <fieldset><legend>Connection</legend>
   <div class="cols">
@@ -43,6 +44,14 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
     <div><label>Download token (filled by Create session)</label><input id="dtok"></div>
   </div>
   <button onclick="call('GET','/healthz')">GET /healthz</button>
+</fieldset>
+
+<fieldset><legend>Box: enroll (fleet stick)</legend>
+  <div class="cols">
+    <div><label>Enroll token (config enroll_token)</label><input id="etok"></div>
+    <div><label>POST /api/v1/enroll body</label><input id="b_enroll" value='{"mac":"aa:bb:cc:dd:ee:ff","current_hostname":"hackbox-eeff"}'></div>
+  </div>
+  <button onclick="doEnroll()">Enroll (fills the box token)</button>
 </fieldset>
 
 <fieldset><legend>Box: sessions</legend>
@@ -90,6 +99,7 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
   </div>
   <button onclick="call('POST','/dash/boxes/'+enc(v('box'))+'/extend',{minutes:+v('min')})">Queue extend</button>
   <button onclick="call('POST','/dash/boxes/'+enc(v('box'))+'/end',{})">Queue end</button>
+  <button onclick="if(confirm('Release '+v('box')+'?'))call('POST','/dash/boxes/'+enc(v('box'))+'/release',{})">Release name</button>
   <div class="cols">
     <div><label>Request id</label><input id="rid"></div>
     <div><label>&nbsp;</label>
@@ -120,7 +130,7 @@ $("base").value = location.protocol.startsWith("http") ? location.origin : "http
 $("b_create").value = JSON.stringify({name: "Ada Lovelace", agent: "claude", minutes: 30, started_at: now(), local_code: ""}, null, 1);
 $("b_end").value = JSON.stringify({ended_at: now(), reason: "timeout", empty: false}, null, 1);
 $("b_cfg").value = JSON.stringify({scope: "*", set: {"anthropic-api-key": "sk-ant-test-12345678", "0g-router-key": "", agents: "claude opencode"}, clear: []}, null, 1);
-$("b_hb").value = JSON.stringify({session_id: "", state: "active", seconds_left: 1500, extend_request_at: 0, status: {state: "active"}}, null, 1);
+$("b_hb").value = JSON.stringify({session_id: "", state: "active", seconds_left: 1500, extend_request_at: 0, status: {state: "active"}, activity: ["Terminal", "OpenCode", "Chromium"]}, null, 1);
 
 function body(id) { try { return JSON.parse($(id).value); } catch (e) { show(0, "bad JSON in " + id + ": " + e.message); throw e; } }
 function show(code, text) {
@@ -141,6 +151,17 @@ async function call(method, path, data, box) {
     show(r.status, t);
     try { return {status: r.status, json: JSON.parse(t)}; } catch (e) { return {status: r.status}; }
   } catch (e) { show(0, String(e)); return {status: 0}; }
+}
+async function doEnroll() {
+  let b; try { b = JSON.parse($("b_enroll").value); } catch (e) { show(0, "bad JSON in enroll body"); return; }
+  try {
+    const r = await fetch(v("base") + "/api/v1/enroll", {method: "POST",
+      headers: {"Authorization": "Bearer " + v("etok"), "Content-Type": "application/json"}, body: JSON.stringify(b)});
+    const t = await r.text();
+    show(r.status, t);
+    const j = JSON.parse(t);
+    if (j.token) { $("tok").value = j.token; $("box").value = j.name; }
+  } catch (e) { show(0, String(e)); }
 }
 async function createSession() {
   const r = await call("POST", "/api/v1/sessions", body("b_create"));

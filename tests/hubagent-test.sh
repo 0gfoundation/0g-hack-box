@@ -21,6 +21,7 @@ wait_for() { local i; for i in $(seq 40); do eval "$1" && return 0; sleep 0.5; d
 mkdir -p "$T/hubdata"
 cat > "$T/hub.json" <<EOF
 {"public_base_url":"http://127.0.0.1:$PORT","boxes":{"testtoken-0123456789abcdef":"hackbox9"},
+ "enroll_token":"enroll-0123456789abcdef","name_prefix":"hackbox",
  "github":{"org":"","token":""},"download_days":7}
 EOF
 "$T/hackbox-hub" -listen 127.0.0.1:$PORT -data "$T/hubdata" -config "$T/hub.json" 2>"$T/hub.log" &
@@ -126,6 +127,20 @@ check "dashboard config never returns the key" bash -c "! curl -fs $CFG | grep -
 post '{"scope":"hackbox9","set":{"0g-router-key":"0g-box-key-abcdefgh"}}'
 check "box override applied" wait_for "[ \"\$(cat $T/secret-0g-router-key 2>/dev/null)\" = 0g-box-key-abcdefgh ]"
 check "dashboard shows keys up to date" wait_for "curl -fs $STATE | python3 -c 'import json,sys; b=[x for x in json.load(sys.stdin)[\"boxes\"] if x[\"name\"]==\"hackbox9\"][0]; sys.exit(0 if b.get(\"config_version\") and b.get(\"config_version\")==b.get(\"applied_config_version\") else 1)'"
+
+# --- fleet stick: the hub numbers new boxes ---
+EN=http://127.0.0.1:$PORT/api/v1/enroll
+enroll() { curl -fs -H 'Authorization: Bearer enroll-0123456789abcdef' -H 'Content-Type: application/json' -d "{\"mac\":\"$1\"}" $EN; }
+R1=$(enroll aa:bb:cc:00:00:01); N1=$(echo "$R1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+check "first new box gets hackbox1" [ "$N1" = hackbox1 ]
+N2=$(enroll aa:bb:cc:00:00:02 | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+check "second new box gets hackbox2" [ "$N2" = hackbox2 ]
+R1b=$(enroll aa:bb:cc:00:00:01)
+check "same MAC gets the same name back" [ "$(echo "$R1b" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')" = hackbox1 ]
+T1=$(echo "$R1b" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+check "enrolled token works for heartbeats" bash -c "curl -fs -H 'Authorization: Bearer $T1' -H 'Content-Type: application/json' -d '{\"state\":\"active\",\"seconds_left\":60,\"activity\":[\"Terminal\",\"OpenCode\"]}' http://127.0.0.1:$PORT/api/v1/heartbeat >/dev/null"
+check "activity shows on the dashboard" bash -c "curl -fs $STATE | grep -q '\"Terminal\",\"OpenCode\"'"
+check "wrong enroll token refused" bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer nope-nope-nope-nope' -d '{\"mac\":\"aa:bb:cc:00:00:03\"}' $EN)\" = 401 ]"
 
 echo; [ $fails = 0 ] && echo "ALL PASSED" || { echo "$fails FAILED"; echo "--- agent log"; tail -20 "$T/agent.log"; echo "--- hub log"; tail -20 "$T/hub.log"; }
 exit $fails

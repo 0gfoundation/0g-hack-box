@@ -75,6 +75,11 @@ a{color:var(--accent)}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(120px);background:var(--panel2);border:1px solid var(--line);padding:12px 18px;border-radius:12px;font-weight:600;transition:transform .25s;z-index:10;max-width:90vw}
 #toast.show{transform:translateX(-50%) translateY(0)}
 #toast.err{border-color:var(--bad);color:var(--bad)}
+.act{color:var(--muted);font-size:14px;min-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act:empty::before{content:"\00a0"}
+.relrow{display:none;justify-content:space-between;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+.card.offline .relrow.can{display:flex}
+.card.offline .relrow button{opacity:1}
 .keys{align-self:flex-start;font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px;background:var(--panel2);color:var(--muted)}
 .keys.ok{background:rgba(56,211,159,.12);color:var(--ok)}
 .keys.pending{background:rgba(255,181,71,.12);color:var(--warn)}
@@ -190,17 +195,24 @@ function makeCard(name) {
     '<div class="top"><span class="dot"></span><span class="boxname"></span><span class="spacer"></span><span class="badge"></span></div>' +
     '<div class="time idle">--:--</div>' +
     '<div class="who"><span class="name"></span><span class="meta"></span></div>' +
+    '<div class="act"></div>' +
     '<span class="keys"></span>' +
     '<div class="reqslot"></div>' +
     '<div class="row">' +
       '<button data-x="5">+5</button><button data-x="10">+10</button><button data-x="15">+15</button>' +
       '<button class="end">End</button>' +
-    '</div>';
+    '</div>' +
+    '<div class="relrow"><span class="relinfo"></span><button class="sm rel">Release name</button></div>';
   $(".boxname", el).textContent = name;
   el.querySelectorAll("button[data-x]").forEach(b => b.onclick = () =>
     post("/dash/boxes/" + encodeURIComponent(name) + "/extend", {minutes: +b.dataset.x}, "Extend +" + b.dataset.x + " sent to " + name));
   $(".end", el).onclick = () => {
     if (confirm("End the session on " + name + " now?")) post("/dash/boxes/" + encodeURIComponent(name) + "/end", {}, "End sent to " + name);
+  };
+  $(".rel", el).onclick = () => {
+    if (confirm("Release the name " + name + "?\n\nIts MAC binding and enrolled token are removed, and the next new box can take the name. Only do this for a box that is gone.")) {
+      post("/dash/boxes/" + encodeURIComponent(name) + "/release", {}, name + " released");
+    }
   };
   el._req = null;
   return el;
@@ -230,6 +242,12 @@ function render() {
   if (!state) return;
   const grid = $("#boxes");
   let online = 0, active = 0, asking = 0;
+  const live = new Set(state.boxes.map(b => b.name));
+  Object.keys(cards).forEach(n => { if (!live.has(n)) { cards[n].remove(); delete cards[n]; } });
+  // A box enrolled or released since the keys panel loaded: reload the panel.
+  const liveKey = [...live].sort().join(",");
+  if (cfg && render.liveKey !== undefined && render.liveKey !== liveKey) loadConfig();
+  render.liveKey = liveKey;
   state.boxes.forEach(b => {
     let el = cards[b.name];
     if (!el) { el = cards[b.name] = makeCard(b.name); grid.appendChild(el); }
@@ -247,6 +265,10 @@ function render() {
       ? [b.agent, b.code, b.extended_minutes ? "+" + b.extended_minutes + " min" : ""].filter(Boolean).join(" · ")
       : (b.last_seen ? "last seen " + ago(state.now - b.last_seen) : "never seen");
     el.querySelectorAll(".row > button").forEach(btn => btn.disabled = !b.online);
+    $(".act", el).textContent = b.online && b.state !== "idle" ? (b.activity || []).join(" · ") : "";
+    const rr = $(".relrow", el);
+    rr.classList.toggle("can", !b.online && (b.enrolled || b.last_seen > 0));
+    $(".relinfo", rr).textContent = b.enrolled ? "MAC " + b.mac : "";
     renderReq(el, b);
     const k = $(".keys", el);
     if (!b.config_version && !b.applied_config_version) { k.textContent = ""; k.className = "keys"; }
@@ -363,6 +385,8 @@ function makeKeyRow(scope) {
 function renderKeys() {
   if (!cfg) return;
   const wrap = $("#keys");
+  const want = new Set(cfg.scopes.map(sc => sc.scope));
+  Object.keys(krows).forEach(n => { if (!want.has(n)) { krows[n].remove(); delete krows[n]; } });
   cfg.scopes.forEach(sc => {
     let el = krows[sc.scope];
     if (!el) { el = krows[sc.scope] = makeKeyRow(sc.scope); wrap.appendChild(el); }

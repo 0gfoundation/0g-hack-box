@@ -148,6 +148,15 @@ lan_ssh_conf() {
   fi
 }
 
+# Fleet stick: the hub hands out this box's name and token (needs the tailnet, so after
+# 05-tailscale.sh). A failure is not fatal: the box keeps hackbox-<mac4> and staff can run
+# `hackbox hub set` later.
+hub_enroll() {
+  local n
+  n=$(python3 "$REPO/files/hub/hackbox-hub-enroll") || return 1
+  hb_line "NAME $n (given by the hub)"
+}
+
 do_provision() {
   as_admin sudo -n true || { echo "admin has no passwordless sudo"; return 1; }
   DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl || return 1
@@ -171,6 +180,10 @@ do_provision() {
       [ $try -lt 3 ] && { hb_line "RETRY $name in 60 s (attempt $((try + 1)) of 3)"; sleep 60; }
     done
     TS_AUTHKEY_ENV=""
+    if [ "$name" = 05-tailscale.sh ] && [ $rc -eq 0 ] &&
+       grep -q '^HUB_ENROLL_TOKEN=' /etc/hackbox/hub.conf 2>/dev/null; then
+      step hub-enroll hub_enroll || hb_line "WARN could not get a name from the hub; later: hackbox hub set"
+    fi
     mdns_keep
     if [ "$name" = 90-verify.sh ]; then
       vout=$(awk -v m="$name" 'index($0, "===== ") == 1 && $NF == m { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' "$DETAIL")

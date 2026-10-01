@@ -87,18 +87,26 @@ the box and the session date and time.
 
 ### 2. Box cards
 
-One card per box in the config, sorted by name, even before a box has ever called in.
+One card per box in the config, plus one per enrolled box, sorted by name, even before a box
+has ever called in.
 
 - Name, a green or red dot (online means a heartbeat within the last 15 s), the state badge
   (`idle`, `active`, `ending`, `resetting`, or `offline`).
 - A big `mm:ss` time left. It counts down every second between polls; amber under 5 minutes,
   red at zero.
 - The attendee name, the agent, the pickup code and any extra minutes so far.
+- A muted line with the programs open on the box, like "Terminal · OpenCode · Chromium". It
+  comes from the heartbeat (`activity`), names only, from the box's allow list. Empty when
+  the box is idle.
 - **+5 / +10 / +15**: `POST /dash/boxes/{box}/extend`. A toast confirms; the box applies it
   on its next heartbeat (within about 3 s).
 - **End**: asks "End the session on <box> now?", then `POST /dash/boxes/{box}/end`.
 - Buttons are disabled while the box is offline. A command the box does not pick up within
   2 minutes is dropped, so it never hits the next attendee.
+- An offline box that is enrolled or has called in before shows **Release name** (and its MAC
+  when enrolled). See "A dead box" below.
+- The dashboard refuses any address that acts as a box (403, "The dashboard is not available
+  from a hack box."), so a box on the tailnet cannot open it.
 
 ### 3. Extend requests
 
@@ -154,7 +162,31 @@ What the box does with it:
 Per-box keys with spending caps are the safer choice: an attendee can read the key on their
 box.
 
-### 6. API test page
+### 6. One stick for many boxes
+
+1. Staff build one USB stick with `HUB_URL` and the fleet `HUB_ENROLL_TOKEN`, no hostname.
+2. Each box installs as `hackbox-<last 4 of its MAC>`. On first boot, right after it joins
+   the tailnet, it calls `POST /api/v1/enroll` with its MAC.
+3. The hub answers with a name and the box's own token: the lowest free `hackboxN`, or the
+   same name as before if this MAC enrolled already (a reinstall keeps its number).
+4. The box renames itself (hostname and tailnet name), writes `hub.conf` with its own token
+   and finishes provisioning under the new name.
+5. A new card appears on the dashboard, and a new row in "Agent keys".
+
+### 7. A dead box
+
+1. A box broke, or was swapped for another machine. Its card shows offline.
+2. Wait until it has been silent for 5 minutes, then press **Release name** on the card and
+   confirm.
+3. `POST /dash/boxes/{box}/release` removes the MAC binding, the enrolled token and the box's
+   heartbeat record. If the box is still sending heartbeats the hub answers 409 and nothing
+   changes.
+4. The card disappears (a box from `config.json` stays, as never seen). The next new box that
+   enrolls gets the freed name. Agent key overrides for that name stay and apply to the new box.
+
+### 8. API test page
 
 `/dash/api_test.html` (tailnet only) exercises every box and dashboard call against the hub
-with a bearer token field. Useful to fake a box before the real agent runs.
+with a bearer token field, plus enrollment. Useful to fake a box before the real agent runs.
+A successful box call from your laptop locks your laptop out of the dashboard for 24 hours
+(the box address guard); run box calls from the hub host (localhost is exempt).

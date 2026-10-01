@@ -51,6 +51,19 @@ APPLIED = os.path.join(STATE_DIR, "config-applied")
 SECRET_NAMES = ("anthropic-api-key", "0g-router-key")
 AGENT_NAMES = ("claude", "claude-0g", "opencode")
 
+# Activity for the dashboard: which programs the attendee runs, as friendly names from this
+# list only (process names, never window titles, URLs, files or screenshots). The welcome
+# screen tells the attendee. Keys are process names as ps shows them (15 characters).
+APPS = {
+    "gnome-terminal-": "Terminal", "gnome-terminal": "Terminal", "xterm": "Terminal",
+    "opencode": "OpenCode", "claude": "Claude Code",
+    "chromium": "Chromium", "chrome": "Chromium", "firefox": "Firefox",
+    "nemo": "Files", "xed": "Text editor", "gedit": "Text editor", "code": "VS Code",
+    "node": "node", "npm": "npm", "npx": "npm", "pnpm": "pnpm", "bun": "bun",
+    "python3": "python", "python": "python", "pip": "pip", "go": "go", "cargo": "cargo",
+    "forge": "foundry", "anvil": "foundry", "git": "git", "docker": "docker",
+}
+
 
 def log(msg):
     print("hackbox-hubagent: " + msg, file=sys.stderr, flush=True)
@@ -266,6 +279,22 @@ class Agent:
         except (OSError, urllib.error.URLError, ValueError) as e:
             log("qr fetch failed: %s" % e)
 
+    @staticmethod
+    def activity(state):
+        if state != "active":
+            return []
+        try:
+            out = subprocess.run(["ps", "-u", str(HACKER_UID), "-o", "comm="],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        seen = []
+        for comm in out.split():
+            app = APPS.get(comm)
+            if app and app not in seen:
+                seen.append(app)
+        return seen[:12]
+
     def heartbeat(self, hub, state):
         status = {}
         try:
@@ -283,6 +312,7 @@ class Agent:
             "seconds_left": left,
             "extend_request_at": int(req) if req and req.isdigit() and live else 0,
             "applied_config_version": self.applied,
+            "activity": self.activity(state),
             "status": status})
         for cmd in reply.get("commands") or []:
             self.run_command(hub, cmd)
