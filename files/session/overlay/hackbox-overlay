@@ -58,16 +58,18 @@ AGENT_WRAPPER = (
 
 def load_conf():
     """Source /etc/hackbox/conf.d the same way the shell helpers do."""
+    # EVENT_TITLE and EVENT_LINE brand the screens (override in conf.d/90-local.conf).
     conf = {"SESSION_MINUTES": "30", "WARN_MINUTES": "5 1",
-            "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24", "HUB_ENABLED": "0"}
+            "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24", "HUB_ENABLED": "0",
+            "EVENT_TITLE": "DEV DAY", "EVENT_LINE": "05 OCT . 2026 . SINGAPORE"}
     script = ('for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done; '
               'printf "%s\\n" "$SESSION_MINUTES" "$WARN_MINUTES" "$END_GRACE_SECONDS" "$ARCHIVE_HOURS" '
-              '"$HUB_ENABLED"')
+              '"$HUB_ENABLED" "$EVENT_TITLE" "$EVENT_LINE"')
     try:
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              timeout=5, env={"PATH": "/usr/bin:/bin"}).stdout.split("\n")
         for key, val in zip(("SESSION_MINUTES", "WARN_MINUTES", "END_GRACE_SECONDS",
-                             "ARCHIVE_HOURS", "HUB_ENABLED"), out):
+                             "ARCHIVE_HOURS", "HUB_ENABLED", "EVENT_TITLE", "EVENT_LINE"), out):
             if val.strip():
                 conf[key] = val.strip()
     except (OSError, subprocess.SubprocessError):
@@ -102,7 +104,9 @@ def load_agents():
             continue
         note = entry.get("note") if isinstance(entry.get("note"), str) else ""
         agents.append({"id": str(entry.get("id", label)), "label": label.strip(),
-                       "command": command.strip(), "note": note.strip()})
+                       "command": command.strip(), "note": note.strip(),
+                       # false when the box has no key for it yet (hackbox-ai-render)
+                       "ready": entry.get("ready", True) is not False})
     return agents
 
 
@@ -134,7 +138,7 @@ def start_unit(unit, done):
     threading.Thread(target=work, daemon=True).start()
 
 
-def save_attendee(name, agent_id, email=""):
+def save_attendee(name, agent_id, email="", telegram=""):
     """Name and agent for the hub agent, which reads this file as root with
     care (no symlinks, small, owned by the attendee). The home is wiped at
     every reset, so it cannot leak into the next session."""
@@ -143,7 +147,8 @@ def save_attendee(name, agent_id, email=""):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            f.write(name[:40] + "\n" + agent_id[:30] + "\n" + email[:120] + "\n")
+            f.write(name[:40] + "\n" + agent_id[:30] + "\n" + email[:120] + "\n" +
+                    telegram[:33] + "\n")
         os.replace(tmp, path)
     except OSError:
         pass
@@ -190,45 +195,63 @@ def apply_terminal_profile():
 # ---------------------------------------------------------------- style ---
 
 CSS_TEMPLATE = """
-.hb-full { background-color: #0d1117; }
-.hb-full label { color: #e6edf3; }
-.hb-brand { font-size: {brand}px; font-weight: bold; color: #7ee787;
-            letter-spacing: 2px;
-}
-.hb-title { font-size: {title}px; font-weight: bold; }
-.hb-body  { font-size: {body}px; color: #c9d1d9; }
-.hb-muted { font-size: {small}px; color: #8b949e; }
-.hb-code  { font-size: {code}px; font-weight: bold; font-family: monospace;
-            color: #f0f6fc;
-            letter-spacing: 8px;
-}
-.hb-error { font-size: {small}px; color: #ff7b72; }
-.hb-rule  { font-size: {body}px; color: #e6edf3; }
-.hb-start { font-size: {button}px; font-weight: bold; padding: {bpad_v}px {bpad_h}px;
-            border-radius: 12px; background-image: none; background-color: #238636;
-            color: #ffffff; border: none; }
-.hb-start:hover { background-color: #2ea043; }
-.hb-start:disabled { background-color: #30363d; color: #8b949e; }
-.hb-start label { color: #ffffff; }
-.hb-note  { font-size: {small}px; color: #d2f4dc; font-weight: normal; }
-.hb-pill  { background-color: #0d1117; border-radius: 10px; border: 2px solid #30363d; }
-.hb-pill label { color: #e6edf3; font-family: monospace; font-weight: bold;
-                 font-size: {pill}px; padding: 2px 8px; }
-.hb-pill.warn { border-color: #d29922; }
-.hb-pill.warn label { color: #f2cc60; }
-.hb-pill.crit { border-color: #f85149; background-color: #3d0f0f; }
-.hb-pill.crit label { color: #ff7b72; }
-.hb-endbtn { font-size: {pillbtn}px; padding: 2px 10px; background-image: none;
-             background-color: #21262d; color: #e6edf3; border: 1px solid #30363d; }
-.hb-name  { font-size: {body}px; padding: 10px 18px; border-radius: 10px;
-            background-image: none; background-color: #161b22; color: #f0f6fc;
-            border: 2px solid #30363d; caret-color: #7ee787; }
-.hb-name:focus { border-color: #7ee787; }
-.hb-url   { font-size: {small}px; color: #79c0ff; font-family: monospace; }
-.hb-endbtn:disabled { color: #6e7681; background-color: #161b22; }
-.hb-ask   { color: #8b949e; font-size: {pillbtn}px; padding: 0 6px; }
-.hb-toast { background-color: #3d2e00; border: 3px solid #d29922; border-radius: 14px; }
-.hb-toast.crit { background-color: #3d0f0f; border-color: #f85149; }
+/* 0G Dev Day: deep indigo to violet, a pink glow from the lower left, white type. */
+.hb-full { background-color: #1b1443;
+  background-image:
+    radial-gradient(circle farthest-side at 0% 100%, rgba(255,205,230,0.95), rgba(214,150,214,0.55) 35%, rgba(120,90,210,0.0) 70%),
+    radial-gradient(circle farthest-side at 100% 0%, rgba(20,14,52,0.95), rgba(20,14,52,0.0) 70%),
+    linear-gradient(160deg, #1d1650 0%, #2f2479 40%, #5a43b4 75%, #8f6fd0 100%); }
+.hb-full label, .hb-full entry, .hb-full button { font-family: "Ubuntu", "Cantarell", sans-serif; }
+.hb-full label { color: #ffffff; }
+.hb-event  { font-size: {event}px; font-weight: 800; letter-spacing: -1px; }
+.hb-line   { font-size: {line}px; font-family: "Ubuntu Mono", monospace; letter-spacing: 6px;
+             color: rgba(255,255,255,0.92); }
+.hb-rulebar { background-color: rgba(255,255,255,0.55); min-height: 1px; }
+.hb-title  { font-size: {title}px; font-weight: 700; }
+.hb-body   { font-size: {body}px; color: rgba(255,255,255,0.92); }
+.hb-muted  { font-size: {small}px; color: rgba(255,255,255,0.68); }
+.hb-tiny   { font-size: {tiny}px; color: rgba(255,255,255,0.55); letter-spacing: 2px;
+             font-family: "Ubuntu Mono", monospace; }
+.hb-card   { background-color: rgba(18,12,48,0.42); border: 1px solid rgba(255,255,255,0.22);
+             border-radius: 28px; padding: {cardpad}px; }
+.hb-flabel { font-size: {small}px; font-weight: 600; color: rgba(255,255,255,0.85);
+             letter-spacing: 1px; }
+.hb-name   { font-size: {body}px; padding: {fpad_v}px {fpad_h}px; border-radius: 14px;
+             background-image: none; background-color: rgba(255,255,255,0.10); color: #ffffff;
+             border: 1px solid rgba(255,255,255,0.30); caret-color: #ffffff;
+             box-shadow: none; }
+.hb-name:focus { border-color: #ffffff; background-color: rgba(255,255,255,0.16); }
+.hb-start  { font-size: {button}px; font-weight: 700; padding: {bpad_v}px {bpad_h}px;
+             border-radius: 999px; background-image: none; background-color: #ffffff;
+             border: none; box-shadow: none; }
+.hb-start label { color: #2a1d6e; }
+.hb-start:hover { background-color: #efe8ff; }
+.hb-start:disabled { background-color: rgba(255,255,255,0.18); }
+.hb-start:disabled label { color: rgba(255,255,255,0.55); }
+.hb-note   { font-size: {small}px; font-weight: 500; }
+.hb-start .hb-note { color: #6a55c8; }
+.hb-start:disabled .hb-note { color: rgba(255,255,255,0.5); }
+.hb-error  { font-size: {small}px; color: #ffd0e6; }
+.hb-code   { font-size: {code}px; font-weight: 700; font-family: "Ubuntu Mono", monospace;
+             letter-spacing: 10px; color: #ffffff; }
+.hb-url    { font-size: {small}px; font-family: "Ubuntu Mono", monospace; color: rgba(255,255,255,0.8); }
+.hb-qr     { background-color: #ffffff; border-radius: 22px; padding: {qrpad}px; }
+.hb-pill   { background-color: rgba(22,15,58,0.92); border-radius: 999px;
+             border: 1px solid rgba(255,255,255,0.28); }
+.hb-pill label { color: #ffffff; font-family: "Ubuntu Mono", monospace; font-weight: bold;
+                 font-size: {pill}px; padding: 2px 10px; }
+.hb-pill.warn { border-color: #ffc46b; }
+.hb-pill.warn label { color: #ffd89a; }
+.hb-pill.crit { border-color: #ff7aa8; background-color: rgba(90,16,52,0.95); }
+.hb-pill.crit label { color: #ffc2d8; }
+.hb-endbtn { font-size: {pillbtn}px; padding: 2px 12px; border-radius: 999px; background-image: none;
+             background-color: rgba(255,255,255,0.12); color: #ffffff; border: 1px solid rgba(255,255,255,0.25); }
+.hb-endbtn label { color: #ffffff; font-family: inherit; }
+.hb-endbtn:disabled { background-color: rgba(255,255,255,0.05); }
+.hb-endbtn:disabled label { color: rgba(255,255,255,0.45); }
+.hb-ask    { color: rgba(255,255,255,0.7); font-size: {pillbtn}px; padding: 0 6px; }
+.hb-toast  { background-color: rgba(30,20,80,0.96); border: 2px solid #ffc46b; border-radius: 22px; }
+.hb-toast.crit { background-color: rgba(90,16,52,0.96); border-color: #ff7aa8; }
 .hb-toast label { color: #ffffff; font-size: {toast}px; font-weight: bold; }
 """
 
@@ -247,9 +270,9 @@ def scale_factor():
 
 def install_css(provider):
     f = scale_factor()
-    sizes = {"brand": 22, "title": 64, "body": 26, "small": 18, "code": 96,
-             "button": 30, "bpad_v": 18, "bpad_h": 40, "pill": 22, "pillbtn": 15,
-             "toast": 30}
+    sizes = {"event": 70, "line": 22, "title": 34, "body": 21, "small": 16, "tiny": 12,
+             "code": 64, "button": 21, "bpad_v": 13, "bpad_h": 30, "pill": 22, "pillbtn": 15,
+             "toast": 30, "cardpad": 28, "fpad_v": 10, "fpad_h": 16, "qrpad": 14}
     css = CSS_TEMPLATE
     for key, px in sizes.items():
         css = css.replace("{" + key + "}", str(int(round(px * f))))
@@ -280,6 +303,71 @@ def label(text="", css=None, wrap=False, xalign=0.5):
     if css:
         w.get_style_context().add_class(css)
     return w
+
+
+# The 0G mark, drawn as SVG (a ring with a slash, and a G), white on the gradient.
+LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 232 108">
+<g fill="none" stroke="#ffffff" stroke-width="21">
+<circle cx="50" cy="50" r="39.5"/>
+<path d="M 189.4 24.6 A 39.5 39.5 0 1 0 199.5 50"/>
+</g>
+<path d="M 160 50 H 210" stroke="#ffffff" stroke-width="21"/>
+<path d="M 26 78 L 58 42" stroke="#ffffff" stroke-width="13" stroke-linecap="butt"/>
+</svg>"""
+
+
+def logo(height):
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.set_size(int(height * 232 / 108), int(height))
+        loader.write(LOGO_SVG.encode())
+        loader.close()
+        return Gtk.Image.new_from_pixbuf(loader.get_pixbuf())
+    except GLib.Error:
+        return label("0G", "hb-event")       # no SVG loader: plain text
+
+
+def lockup(conf, scale=1.0):
+    """0G mark next to the event title (two lines), then the date line."""
+    f = scale_factor() * scale
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=int(28 * f))
+    row.set_halign(Gtk.Align.CENTER)
+    row.pack_start(logo(118 * f), False, False, 0)
+    words = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+    words.set_valign(Gtk.Align.CENTER)
+    for w in (conf.get("EVENT_TITLE") or "").split()[:2]:
+        t = label(w, "hb-event", xalign=0.0)
+        if scale != 1.0:
+            t.set_markup('<span size="%d">%s</span>' % (int(70 * f * 1024 * 0.75), GLib.markup_escape_text(w)))
+        words.pack_start(t, False, False, 0)
+    row.pack_start(words, False, False, 0)
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=int(18 * f))
+    col.set_halign(Gtk.Align.CENTER)
+    col.pack_start(row, False, False, 0)
+    if conf.get("EVENT_LINE"):
+        col.pack_start(label(conf["EVENT_LINE"], "hb-line"), False, False, 0)
+    bar = Gtk.Box()
+    bar.get_style_context().add_class("hb-rulebar")
+    bar.set_size_request(int(150 * scale_factor()), 1)
+    bar.set_halign(Gtk.Align.CENTER)
+    col.pack_start(bar, False, False, int(8 * f))
+    return col
+
+
+def field(title, entry):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    box.pack_start(label(title, "hb-flabel", xalign=0.0), False, False, 0)
+    box.pack_start(entry, False, False, 0)
+    return box
+
+
+def make_entry(placeholder, max_len, on_change):
+    e = Gtk.Entry()
+    e.set_placeholder_text(placeholder)
+    e.set_max_length(max_len)
+    e.get_style_context().add_class("hb-name")
+    e.connect("changed", lambda *_: on_change())
+    return e
 
 
 # -------------------------------------------------------------- windows ---
@@ -317,67 +405,51 @@ class FullScreen(Gtk.Window):
         conf = self.app.conf
         minutes = as_int(conf["SESSION_MINUTES"], 30)
         box = self._column()
-        box.pack_start(label("0G HACK-BOX  ·  " + socket.gethostname(), "hb-brand"), False, False, 0)
-        box.pack_start(label("Build something on 0G.", "hb-title"), False, False, 12)
-        rules = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        rules.set_halign(Gtk.Align.CENTER)
-        for line in (
-            "You get %d minutes. The clock starts when you press a button below." % minutes,
-            "When time is up this machine is wiped. Push your work to GitHub as you go.",
-            "Do not enter personal passwords, wallet seeds or private keys here.",
-        ):
-            rules.pack_start(label("•  " + line, "hb-rule", xalign=0.0), False, False, 0)
-        box.pack_start(rules, False, False, 24)
+        box.set_spacing(int(16 * scale_factor()))
+        box.pack_start(lockup(conf), False, False, 0)
+        box.pack_start(label("Build something on 0G in %d minutes." % minutes, "hb-title"),
+                       False, False, 0)
 
-        # With a hub: the name goes into the session history and the download page.
-        self.name_entry = self.email_entry = None
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=int(14 * scale_factor()))
+        card.get_style_context().add_class("hb-card")
+        card.set_halign(Gtk.Align.CENTER)
+        card.set_size_request(int(600 * scale_factor()), -1)
+
+        # With a hub: who is building, for the history and the download page.
+        self.name_entry = self.email_entry = self.telegram_entry = None
         if self.app.hub:
-            self.name_entry = Gtk.Entry()
-            self.name_entry.set_placeholder_text("Your name")
-            self.name_entry.set_max_length(40)
-            self.name_entry.set_alignment(0.5)
-            self.name_entry.set_width_chars(24)
-            self.name_entry.set_halign(Gtk.Align.CENTER)
-            self.name_entry.get_style_context().add_class("hb-name")
-            self.name_entry.connect("changed", lambda *_: self._name_changed())
-            self.email_entry = Gtk.Entry()
-            self.email_entry.set_placeholder_text("you@example.com")
-            self.email_entry.set_max_length(120)
-            self.email_entry.set_alignment(0.5)
-            self.email_entry.set_width_chars(32)
+            self.name_entry = make_entry("Ada Lovelace", 40, self._name_changed)
+            self.email_entry = make_entry("you@example.com", 120, self._name_changed)
             self.email_entry.set_input_purpose(Gtk.InputPurpose.EMAIL)
-            self.email_entry.get_style_context().add_class("hb-name")
-            self.email_entry.connect("changed", lambda *_: self._name_changed())
-            self.email_entry.connect("activate", lambda *_: None)
-            # A focused entry hides its placeholder, so label both above the fields.
-            fields = Gtk.Grid(column_spacing=24, row_spacing=6)
-            fields.set_halign(Gtk.Align.CENTER)
-            fields.attach(label("Your name", "hb-body"), 0, 0, 1, 1)
-            fields.attach(label("Your email", "hb-body"), 1, 0, 1, 1)
-            fields.attach(self.name_entry, 0, 1, 1, 1)
-            fields.attach(self.email_entry, 1, 1, 1, 1)
-            box.pack_start(fields, False, False, 4)
+            self.telegram_entry = make_entry("@username", 33, self._name_changed)
+            # Labels above the fields: a focused entry hides its placeholder.
+            card.pack_start(field("NAME", self.name_entry), False, False, 0)
+            card.pack_start(field("EMAIL", self.email_entry), False, False, 0)
+            card.pack_start(field("TELEGRAM  (OPTIONAL)", self.telegram_entry), False, False, 0)
 
-        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=28)
-        buttons.set_halign(Gtk.Align.CENTER)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        buttons.set_homogeneous(True)
         self.start_buttons = []
         agents = self.app.agents
         if agents:
             for agent in agents:
-                buttons.pack_start(self._start_button("Start with " + agent["label"],
-                                                      agent["note"], agent), False, False, 0)
+                note = agent["note"] if agent["ready"] else "not ready yet, ask staff"
+                buttons.pack_start(self._start_button("Start with " + agent["label"], note, agent),
+                                   True, True, 0)
         else:
-            buttons.pack_start(self._start_button("Start my session", "", None), False, False, 0)
-        box.pack_start(buttons, False, False, 12)
-
+            buttons.pack_start(self._start_button("Start my session", "", None), True, True, 0)
+        card.pack_start(buttons, False, False, 6)
         self.welcome_error = label("", "hb-error", wrap=True)
-        box.pack_start(self.welcome_error, False, False, 0)
-        box.pack_start(label("Your project folder is ~/project. The agent opens there.",
-                             "hb-muted"), False, False, 20)
+        self.welcome_error.set_no_show_all(True)
+        card.pack_start(self.welcome_error, False, False, 0)
+        box.pack_start(card, False, False, 0)
+
+        rules = "The clock starts when you press Start; when time is up this machine is wiped."
         if self.app.hub:
-            box.pack_start(label("When time is up you get a QR code to download your project. "
-                                 "A copy is kept privately by the organisers.", "hb-muted",
-                                 wrap=True), False, False, 0)
+            rules += "\nYou get a QR code to download your project at the end."
+        rules += "\nNever enter personal passwords, wallet seeds or private keys here."
+        box.pack_start(label(rules, "hb-muted", wrap=True), False, False, 0)
+        box.pack_start(label(socket.gethostname().upper(), "hb-tiny"), False, False, 4)
         self._name_changed()
         return box
 
@@ -391,18 +463,29 @@ class FullScreen(Gtk.Window):
             return ""
         return self.email_entry.get_text().strip()
 
+    def attendee_telegram(self):
+        if self.telegram_entry is None:
+            return ""
+        t = self.telegram_entry.get_text().strip().lstrip("@")
+        return "@" + t if re.fullmatch(r"[A-Za-z0-9_]{5,32}", t) else ""
+
     def _name_changed(self):
-        """Start stays disabled until a name (2+ characters) and an email are typed."""
+        """Start stays disabled until a name (2+ characters) and an email are typed, and for
+        an agent the box has no key for."""
         ok = self.name_entry is None or (
             len(self.attendee_name()) >= 2 and
             re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", self.attendee_email()) is not None)
+        tg = self.telegram_entry.get_text().strip().lstrip("@") if self.telegram_entry else ""
+        if tg and not re.fullmatch(r"[A-Za-z0-9_]{5,32}", tg):
+            ok = False                          # optional, but if typed it must be valid
         for b in self.start_buttons:
-            b.set_sensitive(ok and not self.busy)
+            b.set_sensitive(ok and not self.busy and getattr(b, "hb_ready", True))
 
     def _start_button(self, text, note, agent):
         btn = Gtk.Button()
         btn.get_style_context().add_class("hb-start")
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        btn.hb_ready = agent is None or agent["ready"]
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         inner.pack_start(label(text), False, False, 0)
         if note:
             inner.pack_start(label(note, "hb-note"), False, False, 0)
@@ -413,25 +496,33 @@ class FullScreen(Gtk.Window):
 
     def _build_ending(self):
         box = self._column()
-        self.ending_title = label("Time is up. Thanks for hacking!", "hb-title")
-        box.pack_start(self.ending_title, False, False, 0)
+        box.set_spacing(int(14 * scale_factor()))
+        box.pack_start(lockup(self.app.conf, scale=0.55), False, False, 0)
+        self.ending_title = label("Time is up. Thanks for building!", "hb-title")
+        box.pack_start(self.ending_title, False, False, 6)
         self.code_intro = label("", "hb-body", wrap=True)
         self.qr_image = Gtk.Image()
+        self.qr_frame = Gtk.Box()
+        self.qr_frame.get_style_context().add_class("hb-qr")
+        self.qr_frame.set_halign(Gtk.Align.CENTER)
+        self.qr_frame.add(self.qr_image)
         self.url_label = label("", "hb-url", wrap=True)
         self.url_label.set_selectable(False)
         self.code_label = label("", "hb-code")
-        self.code_after = label("", "hb-body", wrap=True)
+        self.code_after = label("", "hb-muted", wrap=True)
         self.done_button = Gtk.Button(label="Done")
         self.done_button.get_style_context().add_class("hb-start")
         self.done_button.set_halign(Gtk.Align.CENTER)
+        self.done_button.set_size_request(int(280 * scale_factor()), -1)
         self.done_button.connect("clicked", self._done)
         self.ending_countdown = label("", "hb-muted")
         # Shown or hidden per session by _update_ending, not by show_all().
-        for w in (self.qr_image, self.url_label, self.done_button):
+        for w in (self.qr_frame, self.url_label, self.done_button):
             w.set_no_show_all(True)
-        for w in (self.code_intro, self.qr_image, self.url_label, self.code_label,
+        self.qr_image.show()
+        for w in (self.code_intro, self.qr_frame, self.url_label, self.code_label,
                   self.code_after, self.done_button, self.ending_countdown):
-            box.pack_start(w, False, False, 8)
+            box.pack_start(w, False, False, 4)
         return box
 
     def _done(self, *_):
@@ -440,15 +531,18 @@ class FullScreen(Gtk.Window):
 
     def _build_resetting(self):
         box = self._column()
-        box.pack_start(label("Resetting this machine for the next person…", "hb-title"),
+        box.set_spacing(int(18 * scale_factor()))
+        box.pack_start(lockup(self.app.conf, scale=0.55), False, False, 0)
+        box.pack_start(label("Getting this station ready for the next builder…", "hb-title"),
                        False, False, 0)
-        box.pack_start(label("This takes a few seconds.", "hb-body"), False, False, 12)
+        box.pack_start(label("This takes a few seconds.", "hb-muted"), False, False, 0)
         return box
 
     def set_busy(self, busy, error=""):
         self.busy = busy
         self._name_changed()
         self.welcome_error.set_text(error)
+        self.welcome_error.set_visible(bool(error))
 
     def show_face(self, face):
         if face != self.face:
@@ -475,8 +569,8 @@ class FullScreen(Gtk.Window):
 
     def _update_ending(self):
         name = read_run("attendee")
-        self.ending_title.set_text("Time is up. Thanks, %s!" % name.split()[0] if name
-                                   else "Time is up. Thanks for hacking!")
+        self.ending_title.set_text("Time is up. Thanks for building, %s!" % name.split()[0] if name
+                                   else "Time is up. Thanks for building!")
         self.done_button.set_visible(self.app.hub)
         url, hub_code = read_run("hub-url"), read_run("hub-code")
         if url and hub_code and self._show_qr():
@@ -490,7 +584,7 @@ class FullScreen(Gtk.Window):
                                      "are not kept." % url.split("/d/")[0])
             self.url_label.show()
         else:
-            self.qr_image.hide()
+            self.qr_frame.hide()
             self.url_label.hide()
             self._local_code()
         until = read_run_int("ending-until")
@@ -514,13 +608,13 @@ class FullScreen(Gtk.Window):
             return False
         if self.qr_shown != mtime:
             try:
-                size = int(primary_geometry().height / 3)
+                size = int(primary_geometry().height / 3.6)
                 pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
             except GLib.Error:
                 return False
             self.qr_image.set_from_pixbuf(pix)
             self.qr_shown = mtime
-        self.qr_image.show()
+        self.qr_frame.show()
         return True
 
     def _local_code(self):
@@ -743,7 +837,7 @@ class Overlay:
         self.full.set_busy(True, "")
         if self.hub:
             save_attendee(self.full.attendee_name(), agent["id"] if agent else "",
-                          self.full.attendee_email())
+                          self.full.attendee_email(), self.full.attendee_telegram())
         self.we_started = True
         self.pending_agent = agent
         self.start_deadline = time.time() + 15

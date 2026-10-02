@@ -53,7 +53,7 @@ AGENT_PID=$!
 sleep 1
 
 # --- session starts ---
-printf 'Ada  Lovelace\x07\nclaude\nada@example.com\n' > "$T/home/attendee"
+printf 'Ada  Lovelace\x07\nclaude\nada@example.com\n@ada_lovelace\n' > "$T/home/attendee"
 echo $(( $(date +%s) + 1800 )) > "$RUN/session-end"
 echo active > "$RUN/state"
 check "agent registers the session and writes hub-url" wait_for "[ -s $RUN/hub-url ]"
@@ -66,6 +66,7 @@ check "dashboard shows the box active with the name" \
   wait_for "curl -fs $STATE | python3 -c 'import json,sys; b=[x for x in json.load(sys.stdin)[\"boxes\"] if x.get(\"name\")==\"hackbox9\"]; sys.exit(0 if b and b[0].get(\"state\")==\"active\" else 1)'"
 check "dashboard JSON has the attendee name" bash -c "curl -fs $STATE | grep -q 'Ada Lovelace'"
 check "dashboard has the attendee email" bash -c "curl -fs $STATE | grep -q 'ada@example.com'"
+check "dashboard has the Telegram handle" bash -c "curl -fs $STATE | grep -q '@ada_lovelace'"
 check "download page does not show the email" bash -c "! curl -fs '$URL' | grep -q 'ada@example.com'"
 
 # --- extend request, approval ---

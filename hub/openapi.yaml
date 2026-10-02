@@ -89,6 +89,10 @@ components:
           maxLength: 120
           description: Optional attendee email. Trimmed; if it does not look like local@domain.tld (or is not a string) it is stored as "" and the session is still created. Shown to staff only, never on the public page or in the GitHub repo.
           example: ada@example.com
+        telegram:
+          type: string
+          description: Optional Telegram handle, with or without a leading "@". Trimmed, one "@" stripped, then it must match ^[A-Za-z0-9_]{5,32}$; stored as "@name", or "" if invalid (the session is still created). Staff only, like email.
+          example: '@ada_lovelace'
     CreateSessionResponse:
       type: object
       required: [id, token, code, url, expires_at]
@@ -246,6 +250,7 @@ components:
         session_id: { type: string }
         attendee: { type: string }
         email: { type: string, description: 'Attendee email of the current session, "" when none' }
+        telegram: { type: string, description: 'Attendee Telegram handle of the current session ("@name"), "" when none' }
         agent: { type: string }
         started_at: { type: integer, format: int64 }
         minutes: { type: integer }
@@ -270,6 +275,7 @@ components:
         code: { type: string }
         local_code: { type: string }
         email: { type: string }
+        telegram: { type: string, example: '@ada_lovelace' }
         minutes: { type: integer }
         extended_minutes: { type: integer }
         started_at: { type: integer, format: int64 }

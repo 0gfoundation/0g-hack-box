@@ -49,6 +49,7 @@ type dashBox struct {
 	SessionID       string       `json:"session_id"`
 	Attendee        string       `json:"attendee"`
 	Email           string       `json:"email"`
+	Telegram        string       `json:"telegram"`
 	Agent           string       `json:"agent"`
 	StartedAt       int64        `json:"started_at"`
 	Minutes         int          `json:"minutes"`
@@ -77,6 +78,7 @@ type dashSession struct {
 	Code            string `json:"code"`
 	LocalCode       string `json:"local_code"`
 	Email           string `json:"email"`
+	Telegram        string `json:"telegram"`
 	Minutes         int    `json:"minutes"`
 	ExtendedMinutes int    `json:"extended_minutes"`
 	StartedAt       int64  `json:"started_at"`
@@ -157,6 +159,7 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 		if b.SessionID != "" {
 			if ss, err := s.sessionBy("id", b.SessionID); err == nil {
 				b.Attendee, b.Email, b.Agent, b.StartedAt = ss.Name, ss.Email, ss.Agent, ss.StartedAt
+				b.Telegram = ss.Telegram
 				b.Minutes, b.ExtendedMinutes, b.Code = ss.Minutes, ss.ExtendedMinutes, ss.Code
 			}
 			var q dashRequest
@@ -178,7 +181,7 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, ss := range list {
 		d := dashSession{
-			ID: ss.ID, Box: ss.Box, Name: ss.Name, Agent: ss.Agent, Code: ss.Code, LocalCode: ss.LocalCode, Email: ss.Email,
+			ID: ss.ID, Box: ss.Box, Name: ss.Name, Agent: ss.Agent, Code: ss.Code, LocalCode: ss.LocalCode, Email: ss.Email, Telegram: ss.Telegram,
 			Minutes: ss.Minutes, ExtendedMinutes: ss.ExtendedMinutes, StartedAt: ss.StartedAt,
 			EndedAt: ss.EndedAt, EndReason: ss.EndReason, ArchiveBytes: ss.ArchiveBytes, Empty: ss.Empty,
 			GitHubStatus: ss.GitHubStatus, GitHubRepo: ss.GitHubRepo, GitHubError: ss.GitHubError,

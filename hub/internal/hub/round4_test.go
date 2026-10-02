@@ -100,3 +100,66 @@ func TestFinish(t *testing.T) {
 		t.Errorf("result: %d", w.Code)
 	}
 }
+
+func TestCleanTelegram(t *testing.T) {
+	cases := map[string]string{
+		"ada_l":                 "@ada_l",
+		"@AdaLovelace":          "@AdaLovelace",
+		"  @ada_12345  ":        "@ada_12345",
+		"@@ada_l":               "",
+		"ada":                   "",
+		"ada-lovelace":          "",
+		"ada lovelace":          "",
+		"":                      "",
+		"@":                     "",
+		"t.me/ada_l":            "",
+		strings.Repeat("a", 33): "",
+		strings.Repeat("a", 32): "@" + strings.Repeat("a", 32),
+	}
+	for in, want := range cases {
+		if got := cleanTelegram(in); got != want {
+			t.Errorf("cleanTelegram(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSessionTelegram(t *testing.T) {
+	e := newEnv(t, nil)
+	start := func(tok string, tg any) createSessionResp {
+		w := e.do("POST", "/api/v1/sessions", map[string]any{"name": "Ada", "minutes": 30, "email": "ada@example.com", "telegram": tg}, box(tok))
+		if w.Code != 200 {
+			t.Fatalf("start with telegram %v: %d %s", tg, w.Code, w.Body)
+		}
+		return decode[createSessionResp](t, w)
+	}
+	for _, tg := range []any{"no", "bad-handle!", 12345, map[string]any{}} {
+		r := start(tok2, tg)
+		if ss, _ := e.s.sessionBy("id", r.ID); ss.Telegram != "" {
+			t.Errorf("invalid telegram %v stored as %q", tg, ss.Telegram)
+		}
+	}
+	plain := start(tok2, "grace_hopper")
+	if ss, _ := e.s.sessionBy("id", plain.ID); ss.Telegram != "@grace_hopper" {
+		t.Errorf("without @: %q", ss.Telegram)
+	}
+	r := start(tok1, "@ada_lovelace")
+	heartbeat(e, tok1, map[string]any{"session_id": r.ID, "state": "active", "seconds_left": 100})
+	st := dashState(e)
+	if b := findBox(st, "hackbox1"); b.Telegram != "@ada_lovelace" || b.Email != "ada@example.com" {
+		t.Errorf("box card %+v", b)
+	}
+	if st.Sessions[0].ID != r.ID || st.Sessions[0].Telegram != "@ada_lovelace" {
+		t.Errorf("history %+v", st.Sessions[0])
+	}
+	check := func(when string) {
+		w := e.do("GET", "/d/"+r.Token, nil, nil)
+		if strings.Contains(w.Body.String(), "ada_lovelace") {
+			t.Errorf("telegram on the %s download page", when)
+		}
+	}
+	check("preparing")
+	e.do("PUT", "/api/v1/sessions/"+r.ID+"/archive", makeTarGz(t, goodTar), box(tok1))
+	check("ready")
+	e.do("POST", "/api/v1/sessions/"+r.ID+"/end", map[string]any{"ended_at": e.clk.Now().Unix(), "reason": "done"}, box(tok1))
+	check("ended")
+}

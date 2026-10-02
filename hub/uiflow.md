@@ -10,13 +10,14 @@ Screens on the box are drawn by the overlay. Pages on a phone or laptop are serv
 
 ### 1. Welcome screen (box)
 
-1. The attendee types a first name (optional), optionally an email, and presses an agent
-   button.
+1. The attendee types a first name (optional), optionally an email and a Telegram handle,
+   and presses an agent button.
 2. The overlay writes the name to `~/.cache/hackbox/attendee-name` and starts the session.
 3. Within a second the box agent sees `idle` turn into `active` and calls
-   `POST /api/v1/sessions` with the cleaned name, email, agent, minutes and start time. An
-   email that does not look like one is dropped; the session starts anyway. Only staff see
-   the email (dashboard); the download page never shows it.
+   `POST /api/v1/sessions` with the cleaned name, email, Telegram handle, agent, minutes and
+   start time. An email or handle that does not look right is dropped (a handle is 5 to 32
+   letters, digits or underscores, with or without "@"); the session starts anyway. Only
+   staff see them (dashboard); the download page never shows them.
 4. The hub answers with `id`, `token`, `code`, `url`, `expires_at`. The agent writes `url`
    to `/run/hackbox/hub-url` and fetches `GET /api/v1/sessions/{id}/qr.png` into
    `/run/hackbox/qr.png`.
@@ -97,8 +98,8 @@ has ever called in.
   (`idle`, `active`, `ending`, `resetting`, or `offline`).
 - A big `mm:ss` time left. It counts down every second between polls; amber under 5 minutes,
   red at zero.
-- The attendee name, the email under it when given, the agent, the pickup code and any
-  extra minutes so far.
+- The attendee name, the email and the Telegram handle under it when given, the agent, the
+  pickup code and any extra minutes so far.
 - A muted line with the programs open on the box, like "Terminal · OpenCode · Chromium". It
   comes from the heartbeat (`activity`), names only, from the box's allow list. Empty when
   the box is idle.
@@ -133,7 +134,7 @@ Below the cards, the last 200 sessions, newest first:
 | Column | Shows |
 |---|---|
 | Started | date and time |
-| Box, Name, Agent, Code | as registered; the email shows under the name when given |
+| Box, Name, Agent, Code | as registered; the email and Telegram handle show under the name when given |
 | Duration | real time used once ended ("running" before), then planned minutes and extensions |
 | End reason | as the box reported it |
 | Size | the stored tarball |

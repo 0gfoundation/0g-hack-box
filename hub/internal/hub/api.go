@@ -70,6 +70,8 @@ type createSessionReq struct {
 	// Email is optional. An invalid one is stored as "" and never fails the start.
 	// It is decoded loosely: a number or object is ignored, not a 400.
 	Email any `json:"email"`
+	// Telegram is an optional handle, with or without "@". Same rules as Email.
+	Telegram any `json:"telegram"`
 }
 
 type createSessionResp struct {
@@ -123,9 +125,9 @@ func (s *Server) apiCreateSession(w http.ResponseWriter, r *http.Request, box st
 	token := randomToken()
 	ghStatus := "disabled"
 	_, err := s.db.Exec(`INSERT INTO sessions (id, box, name, agent, minutes, started_at, token, code,
-		local_code, expires_at, github_status, created_at, email) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		local_code, expires_at, github_status, created_at, email, telegram) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, box, cleanText(req.Name, 80), cleanText(req.Agent, 40), req.Minutes, req.StartedAt,
-		token, code, cleanText(req.LocalCode, 16), expires, ghStatus, now, cleanEmail(asString(req.Email)))
+		token, code, cleanText(req.LocalCode, 16), expires, ghStatus, now, cleanEmail(asString(req.Email)), cleanTelegram(asString(req.Telegram)))
 	if err != nil {
 		s.serverError(w, err)
 		return
@@ -150,6 +152,17 @@ func cleanEmail(e string) string {
 		return ""
 	}
 	return e
+}
+
+var telegramRe = regexp.MustCompile(`^[A-Za-z0-9_]{5,32}$`)
+
+// cleanTelegram returns "@name" for a valid Telegram username, else "".
+func cleanTelegram(t string) string {
+	t = strings.TrimPrefix(strings.TrimSpace(t), "@")
+	if !telegramRe.MatchString(t) {
+		return ""
+	}
+	return "@" + t
 }
 
 func asString(v any) string {

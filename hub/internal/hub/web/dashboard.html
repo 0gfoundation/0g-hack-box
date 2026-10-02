@@ -44,7 +44,8 @@ main{padding:22px;max-width:1500px;margin:0 auto}
 .who .name{font-size:19px;font-weight:700}
 .who .meta{color:var(--muted);font-size:14px}
 .who .email{color:var(--muted);font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.who .email:empty{display:none}
+.who .email:empty,.who .tg:empty{display:none}
+.who .tg{color:var(--muted);font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row.finrow{display:none}
 .card.ending .row.ctl{display:none}
 .card.ending .row.finrow{display:flex}
@@ -200,7 +201,7 @@ function makeCard(name) {
   el.innerHTML =
     '<div class="top"><span class="dot"></span><span class="boxname"></span><span class="spacer"></span><span class="badge"></span></div>' +
     '<div class="time idle">--:--</div>' +
-    '<div class="who"><span class="name"></span><span class="email"></span><span class="meta"></span></div>' +
+    '<div class="who"><span class="name"></span><span class="email"></span><span class="tg"></span><span class="meta"></span></div>' +
     '<div class="act"></div>' +
     '<span class="keys"></span>' +
     '<div class="reqslot"></div>' +
@@ -275,6 +276,7 @@ function render() {
     $(".who .name", el).textContent = who ? (b.attendee || "anonymous")
       : (b.online ? "Waiting for an attendee" : (installing ? "Installing" : "No heartbeat"));
     $(".who .email", el).textContent = who ? (b.email || "") : "";
+    $(".who .tg", el).textContent = who ? (b.telegram || "") : "";
     el.classList.toggle("ending", b.online && b.state === "ending");
     $(".who .meta", el).textContent = who
       ? [b.agent, b.code, b.extended_minutes ? "+" + b.extended_minutes + " min" : ""].filter(Boolean).join(" · ")
@@ -331,7 +333,7 @@ function renderHistory() {
     let gh = '<span class="gh ' + esc(s.github_status) + '"' + (s.github_error ? ' title="' + esc(s.github_error) + '"' : "") + '>' + esc(s.github_status || "-") + '</span>';
     if (s.github_url) gh = '<a href="' + esc(s.github_url) + '" target="_blank" rel="noopener">' + gh + '</a>';
     const files = s.download_url ? '<a href="' + esc(s.download_url) + '">zip</a>' : (s.empty ? '<span class="muted">empty</span>' : '<span class="muted">-</span>');
-    return '<tr><td>' + esc(when(s.started_at)) + '</td><td>' + esc(s.box) + '</td><td class="name">' + esc(s.name || "anonymous") + (s.email ? '<br><span class="muted" style="font-weight:400">' + esc(s.email) + '</span>' : "") +
+    return '<tr><td>' + esc(when(s.started_at)) + '</td><td>' + esc(s.box) + '</td><td class="name">' + esc(s.name || "anonymous") + ((s.email || s.telegram) ? '<br><span class="muted" style="font-weight:400">' + esc([s.email, s.telegram].filter(Boolean).join(" · ")) + '</span>' : "") +
       '</td><td>' + esc(s.agent) + '</td><td><code>' + esc(s.code) + '</code></td><td class="num">' + dur + ext +
       '</td><td>' + esc(s.end_reason) + '</td><td class="num">' + esc(size(s.archive_bytes)) + '</td><td>' + gh + '</td><td>' + files + '</td></tr>';
   }).join("");
