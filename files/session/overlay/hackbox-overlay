@@ -39,6 +39,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
 
 RUN = "/run/hackbox"
+ASSETS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets")
 AGENTS_FILE = "/etc/hackbox/agents.json"
 HOME = os.path.expanduser("~")
 PROJECT = os.path.join(HOME, "project")
@@ -316,7 +317,86 @@ LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 232 108">
 </svg>"""
 
 
+# Singapore, very faint along the bottom: the Merlion, the Flyer, Marina Bay Sands and its
+# SkyPark, the Gardens by the Bay Supertrees with the skyway and a Flower Dome.
+SKYLINE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 300">
+<g fill="#ffffff">
+ <g fill-opacity="0.045">
+  <rect x="560" y="178" width="34" height="122"/><rect x="600" y="150" width="26" height="150"/>
+  <rect x="632" y="192" width="38" height="108"/><rect x="676" y="165" width="24" height="135"/>
+  <rect x="706" y="205" width="30" height="95"/>
+ </g>
+ <rect x="0" y="292" width="2000" height="8" fill-opacity="0.05"/>
+ <g fill-opacity="0.09">
+  <rect x="188" y="262" width="74" height="30"/>
+  <path d="M206 262 C200 232 205 206 222 193 C228 181 245 179 252 191 C258 199 256 211 248 217 C246 236 250 251 255 262 Z"/>
+ </g>
+ <path d="M252 201 Q286 197 302 264" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="3"/>
+ <g fill="none" stroke="#ffffff">
+  <circle cx="425" cy="150" r="86" stroke-opacity="0.09" stroke-width="5"/>
+  <circle cx="425" cy="150" r="79" stroke-opacity="0.05" stroke-width="1.5"/>
+  <g stroke-opacity="0.045" stroke-width="1">
+   <path d="M425 64 V236 M339 150 H511 M364 89 L486 211 M486 89 L364 211 M381 75 L469 225 M469 75 L381 225 M350 107 L500 193 M500 107 L350 193"/>
+  </g>
+  <path d="M425 150 L384 292 M425 150 L466 292" stroke-opacity="0.08" stroke-width="6"/>
+ </g>
+ <g fill-opacity="0.08">
+  <circle cx="425" cy="64" r="4"/><circle cx="511" cy="150" r="4"/><circle cx="339" cy="150" r="4"/>
+  <circle cx="486" cy="89" r="4"/><circle cx="364" cy="89" r="4"/><circle cx="486" cy="211" r="4"/>
+  <circle cx="364" cy="211" r="4"/><circle cx="469" cy="75" r="4"/><circle cx="381" cy="75" r="4"/>
+  <circle cx="500" cy="107" r="4"/><circle cx="350" cy="107" r="4"/><circle cx="500" cy="193" r="4"/>
+  <circle cx="350" cy="193" r="4"/><circle cx="469" cy="225" r="4"/><circle cx="381" cy="225" r="4"/>
+  <rect x="345" y="274" width="160" height="18"/>
+ </g>
+ <g fill-opacity="0.1" transform="translate(450,0)">
+  <path d="M792 128 L830 128 L836 292 L782 292 Z"/>
+  <path d="M872 126 L910 126 L916 292 L862 292 Z"/>
+  <path d="M952 124 L990 124 L996 292 L942 292 Z"/>
+  <path d="M768 128 L1000 121 Q1036 118 1052 108 L1050 117 Q1034 127 1000 130 L768 135 Z"/>
+ </g>
+ <g fill-opacity="0.085" transform="translate(420,0)">
+  <path d="M1124 292 L1136 292 L1133 142 L1127 142 Z M1092 142 Q1130 168 1168 142 Q1130 132 1092 142 Z"/>
+  <path d="M1194 292 L1206 292 L1203 107 L1197 107 Z M1154 107 Q1200 138 1246 107 Q1200 96 1154 107 Z"/>
+  <path d="M1259 292 L1271 292 L1268 162 L1262 162 Z M1231 162 Q1265 184 1299 162 Q1265 153 1231 162 Z"/>
+  <path d="M1324 292 L1336 292 L1333 122 L1327 122 Z M1288 122 Q1330 150 1372 122 Q1330 112 1288 122 Z"/>
+  <path d="M1389 292 L1401 292 L1398 172 L1392 172 Z M1365 172 Q1395 191 1425 172 Q1395 164 1365 172 Z"/>
+  <path d="M1452 292 Q1470 236 1510 230 Q1552 236 1572 292 Z" fill-opacity="0.06"/>
+ </g>
+ <path d="M1620 172 L1750 172" stroke="#ffffff" stroke-opacity="0.07" stroke-width="2.5"/>
+</g>
+</svg>"""
+
+
+def svg_image(svg, width, height):
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.set_size(int(width), int(height))
+        loader.write(svg.encode())
+        loader.close()
+        return Gtk.Image.new_from_pixbuf(loader.get_pixbuf())
+    except GLib.Error:
+        return Gtk.Box()                     # no SVG loader: no skyline
+
+
+def skyline():
+    """The skyline strip for the bottom of a full-screen face: 28 % of the height, never
+    wider than the screen (a wider image would push the window past it)."""
+    geo = primary_geometry()
+    h = min(int(geo.height * 0.28), int(geo.width * 300 / 2000))
+    img = svg_image(SKYLINE_SVG, h * 2000 / 300, h)
+    img.set_valign(Gtk.Align.END)
+    img.set_halign(Gtk.Align.CENTER)
+    return img
+
+
 def logo(height):
+    """The 0G mark (assets/0g-logo-white.png); the drawn SVG if the file is missing."""
+    try:
+        pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            os.path.join(ASSETS, "0g-logo-white.png"), -1, int(height), True)
+        return Gtk.Image.new_from_pixbuf(pix)
+    except GLib.Error:
+        pass
     loader = GdkPixbuf.PixbufLoader()
     try:
         loader.set_size(int(height * 232 / 108), int(height))
@@ -389,7 +469,11 @@ class FullScreen(Gtk.Window):
         self.qr_shown = None
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.NONE)
-        self.add(self.stack)
+        # The skyline is the overlay's base, so it is drawn behind the faces.
+        layers = Gtk.Overlay()
+        layers.add(skyline())
+        layers.add_overlay(self.stack)
+        self.add(layers)
         self.stack.add_named(self._build_welcome(), "welcome")
         self.stack.add_named(self._build_ending(), "ending")
         self.stack.add_named(self._build_resetting(), "resetting")

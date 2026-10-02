@@ -35,6 +35,8 @@ for f in "$S"/sbin/*; do
 done
 sudo install -d -m 0755 /usr/local/lib/hackbox
 sudo install -m 0755 -o root -g root "$S/overlay/hackbox-overlay" /usr/local/lib/hackbox/hackbox-overlay
+sudo install -d -m 0755 /usr/local/lib/hackbox/assets
+sudo install -m 0644 -o root -g root "$S"/overlay/assets/* /usr/local/lib/hackbox/assets/
 sudo install -m 0755 -o root -g root "$HERE/files/hub/hackbox-hubagent" /usr/local/lib/hackbox/hackbox-hubagent
 sudo ln -sfn "$HERE/bin/hackbox" /usr/local/bin/hackbox
 
