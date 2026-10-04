@@ -149,7 +149,7 @@ Follow one from the Mac (it waits until the box is on the tailnet):
 
 ## Update a running box (no reinstall)
 
-    rsync -az --exclude=.git --exclude=.env --exclude=usb/headless.conf --exclude=usb/out \
+    rsync -az --exclude=.git --exclude='.env' --exclude='.env.*' --exclude=usb/headless.conf --exclude=usb/out \
         --exclude='*.iso' --exclude=hub/data --exclude=hub/config.json ./ hackbox1:/opt/hack-box/
     ssh hackbox1 'bash /opt/hack-box/setup/70-session.sh && hackbox reset'
 
