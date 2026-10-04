@@ -122,3 +122,17 @@ now owned by tagged-devices). The boxes are all set to Pure UEFI in the firmware
 The fleet stick (`make-usb-iso.sh --fleet`) was built from `.env` and checked: hub URL and
 enroll token but no box token, the tagged Tailscale key, only the password hash (it matches),
 no `.env` or `headless.conf`. The whole procedure is now `docs/FLEET.md`.
+
+## The fleet is complete (2026-10-04)
+
+- hackbox3 (MAC 00:e0:b4:71:08:20) and hackbox4 (00:e0:b4:71:08:78) were installed from the
+  fleet stick and numbered by the hub. hackbox3 stalled in `15-upgrade.sh` on the iPhone
+  hotspot (2 to 31 KB/s); moving it to the venue Wi-Fi `0G Hackers` (a second
+  NetworkManager profile, raised to priority 10) finished it at once. hackbox4 was installed
+  from a stick rebuilt with `0G Hackers` as its Wi-Fi: about 25 minutes, no phone needed.
+- A backup `.env.bak-*` in the repo root had gone into a fleet ISO (the builder excluded only
+  `./.env`); caught by the leak check before it was written to a stick. The builder now
+  excludes `./.env.*`, `.gitignore` ignores them; no box or commit ever held it.
+- All four: welcome screen with the Dev Day design (official logo, Singapore skyline with a
+  Merlion traced from a photo), name, email and Telegram; agent keys from the dashboard;
+  self-test 66 to 68 passed, 0 failed; all online and idle on the hub.
