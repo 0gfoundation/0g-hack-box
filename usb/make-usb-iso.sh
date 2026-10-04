@@ -106,9 +106,10 @@ if [ $HEADLESS = 1 ]; then
 
   # /hackbox on the stick: repo tree, headless scripts, settings
   H="$W/hackbox"; mkdir -p "$H/headless" "$H/repo"
-  # Leave out the git-ignored local files (.env, usb/headless.conf): they hold the plain
+  # Leave out the git-ignored local files (.env and .env.* in any folder, usb/headless.conf):
+  # they hold the plain
   # passwords and tokens.
-  (cd "$REPO" && tar --exclude=./.git --exclude=./results --exclude='./.env' --exclude='./.env.*' --exclude=./usb/headless.conf \
+  (cd "$REPO" && tar --exclude=./.git --exclude=./results --exclude='.env' --exclude='.env.*' --exclude=./usb/headless.conf \
     --exclude=./usb/out --exclude='*.iso' --exclude='*.iso.sha256' -cf - .) | (cd "$H/repo" && tar -xf -)
   cp "$HERE/headless/"* "$H/headless/"
   q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
