@@ -8,6 +8,7 @@
 #                                      (backup kept, the key goes over stdin) and restart
 #   hub/deploy/faucet-env.sh off       remove the faucet block on jarvis and restart
 #   hub/deploy/faucet-env.sh ledger    testnet 0G the hub on jarvis sent, per status and box
+#   hub/deploy/faucet-env.sh wallets   every funded wallet: time, box, attendee, amount, status, tx link
 #
 # .env.faucet keys: FAUCET_API_KEY (required), FAUCET_API_URL, FAUCET_PROMO_CODE,
 # FAUCET_AMOUNT_OG, FAUCET_SESSION_MAX_OG, FAUCET_WALLET_MAX_OG, FAUCET_BOX_HOURLY_MAX_OG,
@@ -86,6 +87,11 @@ off() {
     chmod 600 config.json && launchctl kickstart -k gui/501/$LABEL && sleep 2 && curl -fsS http://127.0.0.1:8210/healthz && echo"
 }
 
+wallets() {   # every funded wallet: time, box, attendee, amount, status, explorer link
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" \
+    "/usr/bin/sqlite3 -header -column /Users/jarvis/hackbox-hub/data/hub.db \"SELECT datetime(f.created_at,'unixepoch','+8 hours') AS time_sgt, f.box, COALESCE(s.name,'') AS attendee, f.wallet, printf('%.1f', f.amount_milli/1000.0) AS og, f.status, CASE WHEN f.tx_hash<>'' THEN 'https://chainscan-galileo.0g.ai/tx/'||f.tx_hash ELSE '' END AS tx FROM fundings f LEFT JOIN sessions s ON s.id=f.session_id ORDER BY f.created_at\""
+}
+
 ledger() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" \
     "/usr/bin/sqlite3 -header -column /Users/jarvis/hackbox-hub/data/hub.db \"SELECT box, status, COUNT(*) AS n, printf('%.3f', SUM(amount_milli)/1000.0) AS og FROM fundings GROUP BY box, status ORDER BY box, status\""
@@ -95,6 +101,7 @@ case "${1:-}" in
   check) check ;;
   jarvis) jarvis ;;
   off) off ;;
+  wallets) wallets ;;
   ledger) ledger ;;
   *) sed -n '2,16p' "$0"; exit 2 ;;
 esac
