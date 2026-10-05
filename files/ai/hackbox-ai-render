@@ -314,6 +314,34 @@ def opencode_config():
             "doom_loop": "ask",
         },
         "compaction": {"auto": True, "prune": True},
+        # Named subagents on the default model, so the build agent can split a dapp into a
+        # contract part and a frontend part and run both at once (AGENTS.md asks it to).
+        "agent": {
+            "contract": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Writes, compiles, tests and deploys Solidity contracts to the 0G "
+                               "Galileo testnet. Creates and funds the deployer wallet with 0g-fund. "
+                               "Returns the deployed address, ABI path and explorer link.",
+                "prompt": "You build and deploy smart contracts on the 0G Galileo testnet. Follow "
+                          "the 0G skills in /opt/0g-agent-skills for chain details and tooling. "
+                          "Keep contracts small and working. Create a deployer wallet, keep the "
+                          "key in the project .env (gitignored), fund it with `0g-fund <address>`, "
+                          "deploy, and write the address and ABI where the frontend reads them. "
+                          "Reply with the address, the ABI path and the explorer link, briefly.",
+            },
+            "frontend": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Builds the web UI (Vite + React or plain HTML), wires it to the "
+                               "deployed contract and to the local mock API, and starts the dev server.",
+                "prompt": "You build the web frontend quickly: Vite + React unless told otherwise, "
+                          "clean and good looking. Read the contract address and ABI from the paths "
+                          "you are given. For outside data (prices, markets, AI or NFT marketplace, "
+                          "news) use the mock API at http://127.0.0.1:4010 and show a visible "
+                          "\"Mock data\" badge where it is used. Reply with the URL to open, briefly.",
+            },
+        },
     }
 
 

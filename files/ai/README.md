@@ -76,3 +76,22 @@ the session link from `/run/hackbox/hub-url` and goes through the hub's public h
 holds the faucet key and the caps (1 0G per session by default); the box holds no key. The
 fresh home's `AGENTS.md` / `CLAUDE.md` tell both agents to use it instead of a faucet website.
 Without a `faucet` block in the hub config the hub answers 404 and `0g-fund` says so.
+
+## Mock API for outside data (`0g-mock-api`)
+
+`hackbox-mock-api.service` runs `/usr/local/bin/0g-mock-api` on `127.0.0.1:4010` (stdlib
+Python, DynamicUser, no state). It serves fake prices, candles, order books, trades, trading
+pairs, an AI model and agent marketplace, NFT/data listings, news and wallet portfolios, so a
+trading dashboard or marketplace idea shows live looking data in a short session without an
+outside API key. `GET /` lists the endpoints. Every response carries `"mock": true`, a
+`notice` and an `X-Mock-Data: true` header, and the seeded AGENTS.md tells OpenCode to show a
+"Mock data" badge wherever it is used. Real AI still goes to 0G Compute and real contracts
+to the 0G chain.
+
+## Faster builds
+
+The seeded AGENTS.md asks OpenCode to plan in a few lines, keep its context small, and split
+independent work across subagents launched in one message so they run in parallel.
+`hackbox-ai-render` defines two subagents on the default model for that: `contract` (writes,
+funds the deployer with `0g-fund`, deploys to Galileo, returns address, ABI and explorer
+link) and `frontend` (UI wired to the contract and the mock API).

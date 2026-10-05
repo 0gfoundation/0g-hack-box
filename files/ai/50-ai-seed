@@ -82,7 +82,7 @@ skills=/opt/0g-agent-skills
 fund=${HB_FUND_CMD:-/usr/local/bin/0g-fund}
 fundline=""
 if [ -x "$fund" ]; then
-  fundline='Testnet 0G for gas (Galileo): run `0g-fund <wallet address>` to fund a wallet, for example one you just created to deploy contracts. It sends testnet 0G from the event faucet during this session (up to 1 0G per session), waits and prints the tx hash. Do not ask the user to visit a faucet website. `0g-fund --status` shows what this session already got.'
+  fundline='Testnet 0G for gas (Galileo): run `0g-fund <wallet address>` to fund a wallet, for example one you just created to deploy contracts. It sends testnet 0G from the event faucet (a small amount per session, enough for several deploys), waits and prints the tx hash. Do not ask the user to visit a faucet website. `0g-fund --status` shows what this session already got.'
 fi
 [ -r "$skills/CLAUDE.md" ] || log "no 0G agent skills in $skills (run: hackbox skills update)"
 for pair in "CLAUDE.md:$home/.claude/CLAUDE.md" "AGENTS.md:$home/.config/opencode/AGENTS.md"; do
@@ -103,6 +103,40 @@ EOF
       echo
       echo "$fundline"
     fi
+    cat <<EOF
+
+## Working fast (sessions are short)
+
+- Plan first: write a 3 to 6 line plan, then build. Ship the smallest version that demos
+  end to end, then improve it. Keep replies short.
+- Work in parallel: when parts are independent (contract, frontend, scripts), launch
+  subagents with the task tool, several in ONE message so they run at the same time. Use the
+  \`contract\` subagent for Solidity and deploys and the \`frontend\` subagent for the web UI.
+  Give each a complete brief (file paths, ABI or API shape, ports) because they do not see
+  this conversation.
+- Keep context small: search with rg and read only the parts you need. Never read
+  node_modules, lock files, build output or large logs.
+- Start from the examples in $skills/examples/ when one fits instead of from scratch.
+
+## Contracts: fund and deploy yourself
+
+Do not stop at writing a contract. Create a fresh deployer wallet, keep its private key in
+the project's .env (and .env in .gitignore), fund it with \`0g-fund <address>\`, deploy to the
+0G Galileo testnet (chain details in $skills/), and show the explorer link to the contract.
+Write the deployed address and ABI where the frontend reads them.
+
+## External APIs: use the local mock API
+
+Prices, candles, order books, trading pairs, an AI model or agent marketplace, NFT and data
+listings, news and wallet portfolios: when an app needs data like this from an outside
+service, use the mock API on this machine at http://127.0.0.1:4010 (no key, CORS open; GET /
+lists every endpoint, for example /prices?symbols=BTC,ETH,0G, /candles?symbol=ETH&interval=1m,
+/orderbook, /markets, /ai/models, /ai/agents, /marketplace/listings, /news,
+/portfolio?address=0x...). Prices move while you poll, so charts look live. It is fake data:
+always show a visible "Mock data" badge in the UI where it is used and tell the user it is
+mock data. Real AI calls still go to 0G Compute (ZG_ROUTER_API_KEY and OG_ROUTER_URL are in
+the environment) and real contracts to the 0G chain; mock only what has no real source here.
+EOF
   } > "$dst"
 done
 
