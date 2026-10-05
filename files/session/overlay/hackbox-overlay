@@ -64,7 +64,7 @@ def load_conf():
             "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24", "HUB_ENABLED": "0",
             "EVENT_TITLE": "DEV DAY", "EVENT_LINE": "05 OCT . 2026 . SINGAPORE",
             # REWARD_TEXT: shown on the welcome and time-up screens when set.
-            # START_URL: opened next to the agent's terminal (right half) when a session starts.
+            # START_URL: opened next to the agent's terminal (right 30 %) when a session starts.
             "REWARD_TEXT": "", "START_URL": ""}
     script = ('for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done; '
               'printf "%s\\n" "$SESSION_MINUTES" "$WARN_MINUTES" "$END_GRACE_SECONDS" "$ARCHIVE_HOURS" '
@@ -161,7 +161,7 @@ def save_attendee(name, agent_id, email="", telegram=""):
 
 def open_terminal(agent=None, url=""):
     """A terminal in ~/project, running the agent if given, else a shell. With a URL the
-    terminal takes the left half of the screen and Firefox the right half."""
+    terminal takes the left 70 % of the screen and Firefox the right 30 %."""
     os.makedirs(PROJECT, exist_ok=True)
     if agent:
         inner = ["bash", "-lc", AGENT_WRAPPER, "hackbox-agent", agent["command"], agent["label"]]
@@ -190,7 +190,7 @@ def open_terminal(agent=None, url=""):
 
 
 def tile_side_by_side():
-    """Put the terminal on the left half and Firefox on the right half, once both windows
+    """Put the terminal on the left 70 % and Firefox on the right 30 %, once both windows
     exist (up to 30 s). Best effort: if anything is missing, the windows stay as opened."""
     # Not GTK (this runs in a thread): the work area from the window manager, which also
     # leaves out the bottom panel. "0  * DG: ...  VP: 0,0  WA: 0,0 1920x1040  Workspace 1"
@@ -208,8 +208,8 @@ def tile_side_by_side():
     if not area:
         return
     ax, ay, aw, ah = area
-    half = aw // 2
-    want = {"gnome-terminal": ax, "firefox": ax + half}
+    left = aw * 7 // 10                      # the agent's terminal gets 70 %, Firefox 30 %
+    want = {"gnome-terminal": (ax, left), "firefox": (ax + left, aw - left)}
     done = set()
     for _ in range(60):
         try:
@@ -222,12 +222,12 @@ def tile_side_by_side():
             if len(parts) < 3:
                 continue
             wid, wclass = parts[0], parts[2].lower()
-            for key, x in want.items():
+            for key, (x, w) in want.items():
                 if key in wclass and key not in done:
                     subprocess.run(["wmctrl", "-i", "-r", wid, "-b",
                                     "remove,maximized_vert,maximized_horz"], timeout=5)
                     subprocess.run(["wmctrl", "-i", "-r", wid, "-e",
-                                    "0,%d,%d,%d,%d" % (x, ay, half, ah)], timeout=5)
+                                    "0,%d,%d,%d,%d" % (x, ay, w, ah)], timeout=5)
                     done.add(key)
         if len(done) == len(want):
             return
