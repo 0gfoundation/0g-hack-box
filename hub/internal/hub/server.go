@@ -183,6 +183,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dash/requests/{id}", s.dashGuard(s.dashDecide))
 	mux.HandleFunc("POST /dash/boxes/{box}/release", s.dashGuard(s.dashRelease))
 	mux.HandleFunc("GET /dash/sessions/{id}/download", s.dashDownload)
+	mux.HandleFunc("GET /dash/fundings.csv", s.dashFundingsCSV)
+	mux.HandleFunc("GET /dash/rewards.csv", s.dashRewardsCSV)
 	mux.HandleFunc("GET /dash/api_test.html", s.dashAPITest)
 	mux.HandleFunc("GET /dash/config", s.dashConfigGet)
 	mux.HandleFunc("POST /dash/config", s.dashGuard(s.dashConfigSet))

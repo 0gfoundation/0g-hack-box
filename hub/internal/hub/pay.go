@@ -89,8 +89,11 @@ func (p *PayConfig) normalize() error {
 }
 
 // amountUSD renders amount_micros as "$10" or "$2.50".
-func (p PayConfig) amountUSD() string {
-	whole, frac := p.AmountMicros/1_000_000, p.AmountMicros%1_000_000
+func (p PayConfig) amountUSD() string { return fmtUSD(p.AmountMicros) }
+
+// fmtUSD renders micro-dollars as "$10" or "$2.50".
+func fmtUSD(micros int64) string {
+	whole, frac := micros/1_000_000, micros%1_000_000
 	switch {
 	case frac == 0:
 		return fmt.Sprintf("$%d", whole)

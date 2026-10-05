@@ -211,6 +211,9 @@ type heartbeatReq struct {
 	// Activity is the friendly names of the programs the attendee runs.
 	// Invalid entries are dropped; it is cleared when the box is idle.
 	Activity json.RawMessage `json:"activity"`
+	// Usage is the session's OpenCode token totals (see usage.go). Optional; a malformed
+	// one is ignored, never a 400.
+	Usage json.RawMessage `json:"usage"`
 }
 
 type commandOut struct {
@@ -274,6 +277,7 @@ func (s *Server) apiHeartbeat(w http.ResponseWriter, r *http.Request, box string
 			return
 		}
 	}
+	s.recordUsage(sid, req.Usage)
 	if sid != "" && req.ExtendRequestAt != 0 {
 		_, err := s.db.Exec(`INSERT INTO requests (session_id, box, asked_at, status) VALUES (?,?,?,'pending')
 			ON CONFLICT(session_id, asked_at) DO NOTHING`, sid, box, req.ExtendRequestAt)
@@ -399,6 +403,8 @@ type endReq struct {
 	EndedAt int64    `json:"ended_at"`
 	Reason  string   `json:"reason"`
 	Empty   flexBool `json:"empty"`
+	// Usage: the last token totals the box read, as in the heartbeat. Optional.
+	Usage json.RawMessage `json:"usage"`
 }
 
 func (s *Server) apiEnd(w http.ResponseWriter, r *http.Request, box string) {
@@ -424,6 +430,7 @@ func (s *Server) apiEnd(w http.ResponseWriter, r *http.Request, box string) {
 		s.serverError(w, err)
 		return
 	}
+	s.recordUsage(ss.ID, req.Usage)
 	s.db.Exec(`UPDATE requests SET status = 'declined', decided_at = ? WHERE session_id = ? AND status = 'pending'`,
 		s.now().Unix(), ss.ID)
 	writeJSON(w, http.StatusOK, struct{}{})
