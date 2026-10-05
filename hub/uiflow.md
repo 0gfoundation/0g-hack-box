@@ -30,6 +30,14 @@ Screens on the box are drawn by the overlay. Pages on a phone or laptop are serv
 3. When staff extend or end from the dashboard, the next heartbeat reply carries the command.
    The agent runs `hackbox extend <min>` or `hackbox end` and reports
    `POST /api/v1/commands/{id}/result`. The pill shows the new time.
+4. Token usage: at most once a minute (every 15 s on the time-up screen) the agent copies the
+   attendee's OpenCode database (`~/.local/share/opencode/opencode.db` with its `-wal` and
+   `-shm`) into a root-only temp folder, sums the assistant messages' tokens from the copy
+   (input, output, reasoning, cache read and write, replies, per model), deletes the copy and
+   sends the totals as `usage` in the heartbeats. The live file is never opened by the agent,
+   so OpenCode is never locked or slowed. The last totals also go with
+   `POST /api/v1/sessions/{id}/end`. No database, or one that cannot be read: no `usage`.
+   The hub keeps the highest value seen of each counter.
 
 ### 2a. Testnet 0G for a wallet (box, the attendee's agent)
 
@@ -127,6 +135,11 @@ the box and the session date and time.
 2. The page polls `/dash/state` every 2 s. The dot top right says "live" or
    "hub unreachable".
 3. The chips on top count boxes online, boxes in a session, and boxes asking for time.
+4. A second row of chips shows the event totals: tokens in, out and reasoning over every
+   session, sessions that used the agent, "<n> 0G funded of <budget> budget · <n> wallets"
+   (counted transfers since `event_since`, the same sum the event budget cap uses) and
+   "<$> rewards granted · <n> of <m> claims". The funding and reward chips show only when the
+   faucet or Pay is configured or has rows.
 
 ### 2. Box cards
 
@@ -142,6 +155,9 @@ has ever called in.
 - A muted line with the programs open on the box, like "Terminal · OpenCode · Chromium". It
   comes from the heartbeat (`activity`), names only, from the box's allow list. Empty when
   the box is idle.
+- A muted token line for the live session, "tokens 120k in / 30k out · 4k reasoning"
+  (`usage` on the box in `/dash/state`); hover for cache, replies and models. Empty until
+  the box reports usage (OpenCode has answered at least once).
 - **+5 / +10 / +15**: `POST /dash/boxes/{box}/extend`. A toast confirms; the box applies it
   on its next heartbeat (within about 3 s).
 - **End**: asks "End the session on <box> now?", then `POST /dash/boxes/{box}/end`.
@@ -176,13 +192,28 @@ Below the cards, the last 200 sessions, newest first:
 | Box, Name, Agent, Code | as registered; the email and Telegram handle show under the name when given |
 | Duration | real time used once ended ("running" before), then planned minutes and extensions |
 | End reason | as the box reported it |
+| Tokens in, Tokens out | the session's OpenCode totals (hover for reasoning, cache, replies, models); `-` when none |
+| Wallet | one pill per faucet transfer, "0G 0.5" (green completed, blue on its way, red failed or refused), linked to the transaction on chainscan when there is a hash; a "$ $10" pill when the session claimed the reward (red with the outcome when it failed) |
 | Size | the stored tarball |
 | GitHub | `disabled`, `queued`, `pushed` (links to the private repo), `failed` (hover for the error; retried every 5 minutes) |
 | Files | **zip**: `/dash/sessions/{id}/download`, the same zip the attendee gets, also after the attendee link expired; `empty` or `-` otherwise |
 
+### 4a. Funded wallets and rewards
+
+Between the box cards and "Agent keys", two panels, newest first (the last 300 rows each):
+
+1. **Funded wallets**: time, wallet (short form, hover for the full address), box, attendee,
+   amount, status (hover for the faucet's detail) and the transaction hash linked to
+   `https://chainscan-galileo.0g.ai/tx/<hash>` (`faucet.explorer_tx_url`).
+2. **Rewards**: time, wallet, box, attendee, amount and outcome (`granted`, `duplicate`,
+   `rejected`, `error`; hover for the reason).
+3. **CSV** next to each heading downloads every row: `GET /dash/fundings.csv`,
+   `GET /dash/rewards.csv` (with email and Telegram handle, for follow-up). Same guards as the
+   rest of the dashboard.
+
 ### 5. Agent keys and the agent choice
 
-The "Agent keys" panel sits between the box cards and the history. One row for the default
+The "Agent keys" panel sits between the funded wallets and rewards panels and the history. One row for the default
 (all boxes), then one row per box (an override).
 
 1. Each row has a password field for the **Anthropic API key** and the **0G router key**, and
@@ -235,6 +266,8 @@ box.
 ### 8. API test page
 
 `/dash/api_test.html` (tailnet only) exercises every box and dashboard call against the hub
-with a bearer token field, plus enrollment and the public `/d/{token}/fund` calls. Useful to fake a box before the real agent runs.
+with a bearer token field, plus enrollment and the public `/d/{token}/fund` calls.
+"Heartbeat with token usage" sends a growing fake `usage`; the end body carries one too; the
+CSV buttons open the two exports. Useful to fake a box before the real agent runs.
 A successful box call from your laptop locks your laptop out of the dashboard for 24 hours
 (the box address guard); run box calls from the hub host (localhost is exempt).

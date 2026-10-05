@@ -84,6 +84,20 @@ a{color:var(--accent)}
 #toast.err{border-color:var(--bad);color:var(--bad)}
 .act{color:var(--muted);font-size:14px;min-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .act:empty::before{content:"\00a0"}
+.tok{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums;min-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tok b{color:var(--text);font-weight:600}
+.summary.totals .chip{font-size:13px}
+.summary.totals .chip b{font-size:15px}
+h2 .csv{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;margin-left:10px}
+.tablewrap.scroll{max-height:380px;overflow-y:auto}
+.tablewrap.scroll th{position:sticky;top:0}
+table.slim{min-width:720px}
+.pill{font-weight:700;font-size:12px;padding:3px 9px;border-radius:999px;background:var(--panel2);color:var(--muted);text-decoration:none;display:inline-block;margin-right:4px}
+.pill.ok{background:rgba(56,211,159,.14);color:var(--ok)}
+.pill.wait{background:rgba(92,184,255,.14);color:var(--info)}
+.pill.bad{background:rgba(255,107,107,.14);color:var(--bad)}
+.pill.og{background:rgba(155,123,255,.16);color:var(--accent)}
+code.w{font-size:13px}
 .relrow{display:none;justify-content:space-between;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
 .card.offline .relrow.can{display:flex}
 .card.offline .relrow button{opacity:1}
@@ -132,7 +146,22 @@ button.sm{padding:6px 10px;min-width:0;font-size:13px;border-radius:10px}
 </header>
 <main>
   <div class="summary" id="summary"></div>
+  <div class="summary totals" id="totals"></div>
   <div class="grid" id="boxes"></div>
+  <h2>Funded wallets<a class="csv" href="/dash/fundings.csv">CSV</a></h2>
+  <div class="tablewrap scroll">
+    <table class="slim">
+      <thead><tr><th>Time</th><th>Wallet</th><th>Box</th><th>Attendee</th><th>Amount</th><th>Status</th><th>Tx</th></tr></thead>
+      <tbody id="funds"></tbody>
+    </table>
+  </div>
+  <h2>Rewards<a class="csv" href="/dash/rewards.csv">CSV</a></h2>
+  <div class="tablewrap scroll">
+    <table class="slim">
+      <thead><tr><th>Time</th><th>Wallet</th><th>Box</th><th>Attendee</th><th>Amount</th><th>Outcome</th></tr></thead>
+      <tbody id="rewards"></tbody>
+    </table>
+  </div>
   <h2>Agent keys</h2>
   <div class="kp" id="keys">
     <div class="krow head"><div>Scope</div><div>Anthropic API key</div><div>0G router key</div><div>Agents offered</div><div></div></div>
@@ -143,7 +172,7 @@ button.sm{padding:6px 10px;min-width:0;font-size:13px;border-radius:10px}
     <table>
       <thead><tr>
         <th>Started</th><th>Box</th><th>Name</th><th>Agent</th><th>Code</th><th>Duration</th>
-        <th>End reason</th><th>Size</th><th>GitHub</th><th>Files</th>
+        <th>End reason</th><th>Tokens in</th><th>Tokens out</th><th>Wallet</th><th>Size</th><th>GitHub</th><th>Files</th>
       </tr></thead>
       <tbody id="hist"></tbody>
     </table>
@@ -203,6 +232,7 @@ function makeCard(name) {
     '<div class="time idle">--:--</div>' +
     '<div class="who"><span class="name"></span><span class="email"></span><span class="tg"></span><span class="meta"></span></div>' +
     '<div class="act"></div>' +
+    '<div class="tok"></div>' +
     '<span class="keys"></span>' +
     '<div class="reqslot"></div>' +
     '<div class="row ctl">' +
@@ -284,6 +314,12 @@ function render() {
         : (b.last_seen ? "last seen " + ago(state.now - b.last_seen) : "never seen"));
     el.querySelectorAll(".row > button").forEach(btn => btn.disabled = !b.online);
     $(".act", el).textContent = b.online && b.state !== "idle" ? (b.activity || []).join(" · ") : "";
+    const tk = $(".tok", el), u = who ? b.usage : null;
+    if (u) {
+      tk.innerHTML = "tokens <b>" + kfmt(u.input) + "</b> in / <b>" + kfmt(u.output) + "</b> out" +
+        (u.reasoning ? " · " + kfmt(u.reasoning) + " reasoning" : "");
+      tk.title = usageTitle(u);
+    } else { tk.textContent = ""; tk.title = ""; }
     const rr = $(".relrow", el);
     rr.classList.toggle("can", !b.online && !installing && (b.enrolled || b.last_seen > 0));
     $(".relinfo", rr).textContent = b.enrolled ? "MAC " + b.mac : "";
@@ -294,12 +330,14 @@ function render() {
     else { k.textContent = "keys pending, applies at next idle"; k.className = "keys pending"; }
     el._b = b;
   });
+  renderTotals();
   $("#summary").innerHTML =
     '<span class="chip"><b>' + online + '</b>online of ' + state.boxes.length + '</span>' +
     '<span class="chip"><b>' + active + '</b>in session</span>' +
     (asking ? '<span class="chip" style="color:var(--warn);border-color:rgba(255,181,71,.45)"><b>' + asking + '</b>asking for time</span>' : "") +
     '<span class="chip"><b>' + state.sessions.length + '</b>sessions shown</span>';
   tick();
+  renderWallets();
   renderHistory();
 }
 
@@ -320,22 +358,84 @@ function tick() {
   $("#clock").textContent = new Date().toLocaleTimeString();
 }
 
+function kfmt(n) {
+  n = +n || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k";
+  return String(n);
+}
+function usageTitle(u) {
+  const models = Object.entries(u.models || {}).map(([m, n]) => m + ": " + kfmt(n)).join(", ");
+  return "input " + u.input + ", output " + u.output + ", reasoning " + u.reasoning + ", cache read " + u.cache_read +
+    ", cache write " + u.cache_write + ", replies " + u.replies + (models ? "\n" + models : "");
+}
+function fundClass(st) {
+  return st === "completed" ? "ok" : (st === "queued" || st === "executing" || st === "unknown") ? "wait" : "bad";
+}
+function shortW(w) { w = String(w || ""); return w.length > 12 ? w.slice(0, 6) + "…" + w.slice(-4) : w; }
+
+function renderTotals() {
+  const u = state.usage_totals || {}, f = state.funding_totals || {}, r = state.reward_totals || {};
+  let h = '<span class="chip"><b>' + kfmt(u.input) + '</b>tokens in</span>' +
+    '<span class="chip"><b>' + kfmt(u.output) + '</b>out</span>' +
+    '<span class="chip"><b>' + kfmt(u.reasoning) + '</b>reasoning</span>' +
+    '<span class="chip"><b>' + (u.sessions || 0) + '</b>sessions with usage</span>';
+  if (f.enabled || f.transfers) h += '<span class="chip"><b>' + esc(f.funded_og || "0") + '</b>0G funded' +
+    (f.budget_milli ? ' of ' + esc(f.budget_og) + ' budget' : '') + ' · ' + (f.wallets || 0) + ' wallets</span>';
+  if (r.enabled || r.claims) h += '<span class="chip"><b>' + esc(r.granted_usd || "$0") + '</b>rewards granted · ' + (r.granted || 0) + ' of ' + (r.claims || 0) + ' claims</span>';
+  $("#totals").innerHTML = h;
+}
+
+let fundKey = "", rewardKey = "";
+function renderWallets() {
+  const fk = JSON.stringify(state.fundings || []);
+  if (fk !== fundKey) {
+    fundKey = fk;
+    const list = state.fundings || [];
+    $("#funds").innerHTML = !list.length ? '<tr><td colspan="7" class="empty">No wallets funded yet</td></tr>' : list.map(f =>
+      '<tr><td>' + esc(when(f.created_at)) + '</td><td><code class="w" title="' + esc(f.wallet) + '">' + esc(shortW(f.wallet)) + '</code></td><td>' + esc(f.box) +
+      '</td><td class="name">' + esc(f.attendee || "anonymous") + '</td><td class="num">' + esc(f.amount_og) + ' 0G</td><td><span class="pill ' + fundClass(f.status) + '"' +
+      (f.detail ? ' title="' + esc(f.detail) + '"' : "") + '>' + esc(f.status) + '</span></td><td>' +
+      (f.tx_url ? '<a href="' + esc(f.tx_url) + '" target="_blank" rel="noopener"><code class="w">' + esc(shortW(f.tx_hash)) + '</code></a>' : '<span class="muted">-</span>') + '</td></tr>').join("");
+  }
+  const rk = JSON.stringify(state.rewards || []);
+  if (rk !== rewardKey) {
+    rewardKey = rk;
+    const list = state.rewards || [];
+    $("#rewards").innerHTML = !list.length ? '<tr><td colspan="6" class="empty">No rewards claimed yet</td></tr>' : list.map(c =>
+      '<tr><td>' + esc(when(c.created_at)) + '</td><td><code class="w" title="' + esc(c.wallet) + '">' + esc(shortW(c.wallet)) + '</code></td><td>' + esc(c.box) +
+      '</td><td class="name">' + esc(c.attendee || "anonymous") + '</td><td class="num">' + esc(c.amount_usd) + '</td><td><span class="pill ' + (c.credited ? "ok" : "bad") + '"' +
+      (c.detail ? ' title="' + esc(c.detail) + '"' : "") + '>' + esc(c.outcome) + '</span></td></tr>').join("");
+  }
+}
+
 function renderHistory() {
   const key = JSON.stringify(state.sessions);
   if (key === histKey) return;
   histKey = key;
   const tb = $("#hist");
-  if (!state.sessions.length) { tb.innerHTML = '<tr><td colspan="10" class="empty">No sessions yet</td></tr>'; return; }
+  if (!state.sessions.length) { tb.innerHTML = '<tr><td colspan="13" class="empty">No sessions yet</td></tr>'; return; }
   tb.innerHTML = state.sessions.map(s => {
     const planned = s.minutes + s.extended_minutes;
     const dur = s.ended_at ? mmss(s.duration_seconds) : '<span class="muted">running</span>';
     const ext = s.extended_minutes ? ' <span class="muted">(' + planned + ' min, +' + s.extended_minutes + ')</span>' : ' <span class="muted">(' + planned + ' min)</span>';
     let gh = '<span class="gh ' + esc(s.github_status) + '"' + (s.github_error ? ' title="' + esc(s.github_error) + '"' : "") + '>' + esc(s.github_status || "-") + '</span>';
     if (s.github_url) gh = '<a href="' + esc(s.github_url) + '" target="_blank" rel="noopener">' + gh + '</a>';
+    const u = s.usage;
+    const tin = u ? '<span title="' + esc(usageTitle(u)) + '">' + kfmt(u.input) + '</span>' : '<span class="muted">-</span>';
+    const tout = u ? kfmt(u.output) : '<span class="muted">-</span>';
+    let wal = (s.fundings || []).map(f => {
+      const p = '<span class="pill ' + fundClass(f.status) + '" title="' + esc(f.amount_og + " 0G to " + f.wallet + " (" + f.status + ")") + '">0G ' + esc(f.amount_og) + '</span>';
+      return f.tx_url ? '<a href="' + esc(f.tx_url) + '" target="_blank" rel="noopener">' + p + '</a>' : p;
+    }).join("");
+    if (s.reward) wal += '<span class="pill ' + (s.reward.credited ? "ok" : "bad") + '" title="' + esc(s.reward.amount_usd + " reward to " + s.reward.wallet + " (" + s.reward.outcome + ")") + '">$ ' + esc(s.reward.credited ? s.reward.amount_usd : s.reward.outcome) + '</span>';
+    if (!wal) wal = '<span class="muted">-</span>';
     const files = s.download_url ? '<a href="' + esc(s.download_url) + '">zip</a>' : (s.empty ? '<span class="muted">empty</span>' : '<span class="muted">-</span>');
     return '<tr><td>' + esc(when(s.started_at)) + '</td><td>' + esc(s.box) + '</td><td class="name">' + esc(s.name || "anonymous") + ((s.email || s.telegram) ? '<br><span class="muted" style="font-weight:400">' + esc([s.email, s.telegram].filter(Boolean).join(" · ")) + '</span>' : "") +
       '</td><td>' + esc(s.agent) + '</td><td><code>' + esc(s.code) + '</code></td><td class="num">' + dur + ext +
-      '</td><td>' + esc(s.end_reason) + '</td><td class="num">' + esc(size(s.archive_bytes)) + '</td><td>' + gh + '</td><td>' + files + '</td></tr>';
+      '</td><td>' + esc(s.end_reason) + '</td><td class="num">' + tin + '</td><td class="num">' + tout + '</td><td>' + wal +
+      '</td><td class="num">' + esc(size(s.archive_bytes)) + '</td><td>' + gh + '</td><td>' + files + '</td></tr>';
   }).join("");
 }
 

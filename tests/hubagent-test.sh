@@ -4,7 +4,8 @@
 # Fakes /run/hackbox, the archive dir, the attendee's name file and the
 # `hackbox` CLI in a temporary directory, then walks one session:
 # start, heartbeat, extend request, staff approval, extend command, end,
-# archive upload, download page, zip download. Prints PASS/FAIL per check.
+# archive upload, download page, zip download, OpenCode token usage on the
+# dashboard. Prints PASS/FAIL per check.
 #   tests/hubagent-test.sh
 set -uo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -54,7 +55,26 @@ EOF
 chmod +x "$T/hackbox-archive"
 export HB_RUN=$RUN HB_STATE_DIR=$T/state HB_ARCHIVE_DIR=$T/archive HB_HUB_CONF=$T/hub.conf \
   HB_NAME_FILE=$T/home/attendee HB_HACKER_UID=$(id -u) HB_HACKBOX_CMD=$T/hackbox HB_ARCHIVE_CMD=$T/hackbox-archive \
-  HB_SKIP_PERM_CHECK=1 HB_TICK=0.3 HB_BEAT_EVERY=0.5 HB_JOB_BACKOFF_MAX=1 HB_HUB_BACKOFF_MAX=1
+  HB_SKIP_PERM_CHECK=1 HB_TICK=0.3 HB_BEAT_EVERY=0.5 HB_JOB_BACKOFF_MAX=1 HB_HUB_BACKOFF_MAX=1 \
+  HB_OPENCODE_DB=$T/home/opencode.db HB_USAGE_TMP=$T/usagetmp HB_USAGE_EVERY=1 HB_USAGE_ENDING_EVERY=0.5
+mkdir -p "$T/usagetmp"
+# A fake OpenCode database: assistant rows like OpenCode's, plus rows to skip.
+ocdb() {   # ocdb <assistant rows to add>
+  python3 - "$T/home/opencode.db" "$1" <<'PY'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1]); db.execute("pragma journal_mode=wal")
+db.execute("create table if not exists message (id text primary key, session_id text, data text)")
+row = {"role": "assistant", "modelID": "0gm-1.0-35b-a3b",
+       "tokens": {"input": 10, "output": 5, "reasoning": 2, "cache": {"read": 100, "write": 0}}}
+n = db.execute("select count(*) from message").fetchone()[0]
+for i in range(int(sys.argv[2])):
+    db.execute("insert into message values (?, 's', ?)", ("m%d" % (n + i), json.dumps(row)))
+db.execute("insert or ignore into message values ('u1', 's', ?)", (json.dumps({"role": "user"}),))
+db.commit()
+PY
+}
+# usage_of <field>: the hackbox9 box card's usage field, or "none"
+usage_of() { curl -fs "http://127.0.0.1:$PORT/dash/state" | python3 -c 'import json,sys; b=[x for x in json.load(sys.stdin)["boxes"] if x["name"]=="hackbox9"][0]; u=b.get("usage"); print(u.get(sys.argv[1]) if u else "none")' "$1" 2>/dev/null; }
 echo idle > "$RUN/state"
 python3 "$REPO/files/hub/hackbox-hubagent" 2>"$T/agent.log" &
 AGENT_PID=$!
@@ -77,6 +97,18 @@ check "dashboard has the attendee email" bash -c "curl -fs $STATE | grep -q 'ada
 check "dashboard has the Telegram handle" bash -c "curl -fs $STATE | grep -q '@ada_lovelace'"
 check "download page does not show the email" bash -c "! curl -fs '$URL' | grep -q 'ada@example.com'"
 
+# --- token usage from the attendee's OpenCode database (read from a copy) ---
+check "no usage before OpenCode has a database" [ "$(usage_of input)" = none ]
+ocdb 2
+SUM0=$(cksum < "$T/home/opencode.db")
+check "dashboard shows the session's tokens" wait_for "[ \"\$(usage_of input)\" = 20 ]"
+check "usage has output, reasoning, cache read, replies" \
+  [ "$(usage_of output) $(usage_of reasoning) $(usage_of cache_read) $(usage_of replies)" = '10 4 200 2' ]
+check "usage per model" bash -c "curl -fs $STATE | grep -q '\"0gm-1.0-35b-a3b\":34'"
+check "the live database is left untouched" [ "$(cksum < "$T/home/opencode.db")" = "$SUM0" ]
+check "the temp copy is deleted" bash -c "[ -z \"\$(ls -A $T/usagetmp)\" ]"
+check "event totals count the session" bash -c "curl -fs $STATE | python3 -c 'import json,sys; t=json.load(sys.stdin)[\"usage_totals\"]; sys.exit(0 if t[\"input\"]==20 and t[\"sessions\"]==1 else 1)'"
+
 # --- extend request, approval ---
 date +%s > "$RUN/extend-request"; echo pending > "$RUN/extend-status"
 REQ=""
@@ -98,6 +130,8 @@ check "staff +5 runs 'hackbox extend 5'" wait_for "grep -qx 'extend 5' $T/comman
 # --- end, archive, upload ---
 echo ABCDEF > "$RUN/code"; echo ending > "$RUN/state"
 check "download ready on the time-up screen, before Done" wait_for "curl -fs '$URL' | grep -qi download"
+ocdb 1
+check "fresh tokens read on the time-up screen" wait_for "[ \"\$(usage_of input)\" = 30 ]"
 sleep 1
 curl -fs -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/dash/boxes/hackbox9/finish" >/dev/null
 check "staff Finish sets the Done flag on the box" wait_for "[ -e $RUN/ending-done ]"
@@ -107,6 +141,8 @@ echo resetting > "$RUN/state"; sleep 0.6
 echo "ABCDEF $(date +%s)" > "$RUN/last-archive"
 echo idle > "$RUN/state"
 check "upload job finishes" wait_for "[ -z \"\$(ls $T/state/jobs)\" ] && grep -q uploaded $T/agent.log"
+check "history keeps the session's tokens" bash -c "curl -fs $STATE | python3 -c 'import json,sys; s=[x for x in json.load(sys.stdin)[\"sessions\"] if x[\"name\"]==\"Ada Lovelace\"][0]; sys.exit(0 if s[\"usage\"] and s[\"usage\"][\"input\"]==30 and s[\"usage\"][\"replies\"]==3 else 1)'"
+rm -f "$T/home/opencode.db"*
 check "download page now offers the download" wait_for "curl -fs '$URL' | grep -qi download"
 curl -fs -o "$T/dl.zip" "$URL/download"
 check "zip contains the project file" bash -c "unzip -l '$T/dl.zip' | grep -q 'src/index.js'"
@@ -137,10 +173,13 @@ echo resetting > "$RUN/state"; sleep 0.6; echo "none $(date +%s)" > "$RUN/last-a
 CFG=http://127.0.0.1:$PORT/dash/config
 post() { curl -fs -X POST -H 'Content-Type: application/json' -d "$1" "$CFG" >/dev/null; }
 printf 'Linus\n\n' > "$T/home/attendee"
+head -c 4096 /dev/urandom > "$T/home/opencode.db"   # a broken database: no usage, no crash
 echo $(( $(date +%s) + 1800 )) > "$RUN/session-end"; echo active > "$RUN/state"; sleep 1
 post '{"scope":"*","set":{"anthropic-api-key":"sk-ant-test-0123456789","agents":"claude-0g opencode"}}'
 sleep 3
 check "keys not applied during a session" bash -c "! grep -q '^secret set' $T/commands.log"
+check "a broken OpenCode database sends no usage" [ "$(usage_of input)" = none ]
+check "a broken OpenCode database breaks nothing" bash -c "! grep -q 'unexpected error' $T/agent.log"
 echo idle > "$RUN/state"
 check "default key applied when idle" wait_for "grep -qx 'secret set anthropic-api-key' $T/commands.log"
 check "key value delivered on stdin" [ "$(cat "$T/secret-anthropic-api-key" 2>/dev/null)" = "sk-ant-test-0123456789" ]

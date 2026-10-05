@@ -73,6 +73,7 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
   <textarea id="b_hb"></textarea>
   <button onclick="heartbeat(false)">Heartbeat</button>
   <button onclick="heartbeat(true)">Heartbeat with extend request now</button>
+  <button onclick="heartbeat(false,true)">Heartbeat with token usage</button>
   <div class="cols">
     <div><label>Command id</label><input id="cid"></div>
     <div><label>POST /api/v1/commands/{id}/result body</label><input id="b_res" value='{"ok":true,"message":"done"}'></div>
@@ -93,6 +94,8 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
 
 <fieldset><legend>Dashboard</legend>
   <button onclick="call('GET','/dash/state')">GET /dash/state</button>
+  <button onclick="openPath('/dash/fundings.csv')">GET /dash/fundings.csv</button>
+  <button onclick="openPath('/dash/rewards.csv')">GET /dash/rewards.csv</button>
   <div class="cols">
     <div><label>Box name</label><input id="box" value="hackbox1"></div>
     <div><label>Minutes</label><input id="min" value="5"></div>
@@ -140,7 +143,8 @@ const enc = encodeURIComponent;
 const now = () => Math.floor(Date.now() / 1000);
 $("base").value = location.protocol.startsWith("http") ? location.origin : "http://localhost:8210";
 $("b_create").value = JSON.stringify({name: "Ada Lovelace", agent: "claude", minutes: 30, started_at: now(), local_code: "", email: "ada@example.com", telegram: "@ada_lovelace"}, null, 1);
-$("b_end").value = JSON.stringify({ended_at: now(), reason: "timeout", empty: false}, null, 1);
+$("b_end").value = JSON.stringify({ended_at: now(), reason: "timeout", empty: false,
+  usage: {input: 1500, output: 400, reasoning: 0, cache_read: 9000, cache_write: 0, replies: 3, models: {"0gm-1.0-35b-a3b": 1900}}}, null, 1);
 $("b_cfg").value = JSON.stringify({scope: "*", set: {"anthropic-api-key": "sk-ant-test-12345678", "0g-router-key": "", agents: "claude opencode"}, clear: []}, null, 1);
 $("b_hb").value = JSON.stringify({session_id: "", state: "active", seconds_left: 1500, extend_request_at: 0, status: {state: "active"}, activity: ["Terminal", "OpenCode", "Chromium"]}, null, 1);
 
@@ -179,8 +183,14 @@ async function createSession() {
   const r = await call("POST", "/api/v1/sessions", body("b_create"));
   if (r.json && r.json.id) { $("sid").value = r.json.id; $("dtok").value = r.json.token; }
 }
-async function heartbeat(ask) {
+let fakeUsage = 0;
+async function heartbeat(ask, usage) {
   const b = body("b_hb");
+  if (usage) {
+    fakeUsage += 1;   // grows each click; the hub keeps the highest value seen
+    b.usage = {input: 12000 * fakeUsage, output: 3000 * fakeUsage, reasoning: 200 * fakeUsage, cache_read: 90000 * fakeUsage,
+      cache_write: 0, replies: 2 * fakeUsage, models: {"0gm-1.0-35b-a3b": 15200 * fakeUsage}};
+  }
   if (!b.session_id) b.session_id = v("sid");
   if (ask) b.extend_request_at = now();
   if (v("applied")) b.applied_config_version = v("applied");

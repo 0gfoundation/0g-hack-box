@@ -68,6 +68,8 @@ type dashBox struct {
 	MAC        string          `json:"mac"`
 	EnrolledAt int64           `json:"enrolled_at"`
 	Status     json.RawMessage `json:"status"`
+	// Usage: the live session's OpenCode token totals; null when none reported yet.
+	Usage *Usage `json:"usage"`
 }
 
 type dashSession struct {
@@ -94,17 +96,85 @@ type dashSession struct {
 	DownloadURL     string `json:"download_url"`
 	PublicURL       string `json:"public_url"`
 	ExpiresAt       int64  `json:"expires_at"`
+	// Usage: token totals; null when the box never reported any for this session.
+	Usage *Usage `json:"usage"`
+	// Fundings: the session's faucet transfers, newest first; Reward its 0G Pay claim or null.
+	Fundings []dashSessionFunding `json:"fundings"`
+	Reward   *dashSessionReward   `json:"reward"`
+}
+
+type dashSessionFunding struct {
+	Wallet   string `json:"wallet"`
+	AmountOG string `json:"amount_og"`
+	Status   string `json:"status"`
+	TxURL    string `json:"tx_url"`
+}
+
+type dashSessionReward struct {
+	Wallet    string `json:"wallet"`
+	AmountUSD string `json:"amount_usd"`
+	Outcome   string `json:"outcome"`
+	Credited  bool   `json:"credited"`
 }
 
 type dashStateResp struct {
 	Now      int64         `json:"now"`
 	Boxes    []dashBox     `json:"boxes"`
 	Sessions []dashSession `json:"sessions"`
+	// UsageTotals: every session's tokens added up (not only the sessions listed).
+	UsageTotals UsageTotals `json:"usage_totals"`
+	// Fundings and Rewards: the newest dashListMax rows; the CSV exports have all.
+	Fundings      []dashFunding `json:"fundings"`
+	Rewards       []dashReward  `json:"rewards"`
+	FundingTotals fundingTotals `json:"funding_totals"`
+	RewardTotals  rewardTotals  `json:"reward_totals"`
 }
+
+// dashListMax caps the fundings and rewards lists in /dash/state.
+const dashListMax = 300
 
 func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 	now := s.now().Unix()
 	resp := dashStateResp{Now: now, Boxes: []dashBox{}, Sessions: []dashSession{}}
+
+	usage, err := s.allUsage()
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	resp.UsageTotals = usageTotals(usage)
+	if resp.Fundings, err = s.dashFundings(0); err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if resp.Rewards, err = s.dashRewards(0); err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if resp.FundingTotals, err = s.fundingTotals(); err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if resp.RewardTotals, err = s.rewardTotals(); err != nil {
+		s.serverError(w, err)
+		return
+	}
+	fundBySession := map[string][]dashSessionFunding{}
+	for _, f := range resp.Fundings {
+		fundBySession[f.SessionID] = append(fundBySession[f.SessionID],
+			dashSessionFunding{Wallet: f.Wallet, AmountOG: f.AmountOG, Status: f.Status, TxURL: f.TxURL})
+	}
+	rewardBySession := map[string]*dashSessionReward{}
+	for _, c := range resp.Rewards {
+		rewardBySession[c.SessionID] = &dashSessionReward{Wallet: c.Wallet, AmountUSD: c.AmountUSD,
+			Outcome: c.Outcome, Credited: c.Credited}
+	}
+	if len(resp.Fundings) > dashListMax {
+		resp.Fundings = resp.Fundings[:dashListMax]
+	}
+	if len(resp.Rewards) > dashListMax {
+		resp.Rewards = resp.Rewards[:dashListMax]
+	}
 
 	boxes := map[string]*dashBox{}
 	for _, n := range s.allBoxNames() {
@@ -162,6 +232,7 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 				b.Telegram = ss.Telegram
 				b.Minutes, b.ExtendedMinutes, b.Code = ss.Minutes, ss.ExtendedMinutes, ss.Code
 			}
+			b.Usage = usage[b.SessionID]
 			var q dashRequest
 			err := s.db.QueryRow(`SELECT id, asked_at, status, minutes FROM requests
 				WHERE session_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`, b.SessionID).
@@ -186,6 +257,10 @@ func (s *Server) dashState(w http.ResponseWriter, r *http.Request) {
 			EndedAt: ss.EndedAt, EndReason: ss.EndReason, ArchiveBytes: ss.ArchiveBytes, Empty: ss.Empty,
 			GitHubStatus: ss.GitHubStatus, GitHubRepo: ss.GitHubRepo, GitHubError: ss.GitHubError,
 			PublicURL: s.downloadURL(ss.Token), ExpiresAt: ss.ExpiresAt,
+			Usage: usage[ss.ID], Fundings: fundBySession[ss.ID], Reward: rewardBySession[ss.ID],
+		}
+		if d.Fundings == nil {
+			d.Fundings = []dashSessionFunding{}
 		}
 		if ss.EndedAt > ss.StartedAt {
 			d.DurationSeconds = ss.EndedAt - ss.StartedAt

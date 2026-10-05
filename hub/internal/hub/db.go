@@ -109,6 +109,19 @@ CREATE INDEX IF NOT EXISTS fundings_session ON fundings(session_id);
 CREATE INDEX IF NOT EXISTS fundings_wallet ON fundings(wallet, status);
 CREATE INDEX IF NOT EXISTS fundings_box ON fundings(box, created_at);
 
+-- Token usage per session (the attendee's OpenCode), highest value seen of each counter.
+CREATE TABLE IF NOT EXISTS token_usage (
+  session_id  TEXT PRIMARY KEY,
+  input       INTEGER NOT NULL DEFAULT 0,
+  output      INTEGER NOT NULL DEFAULT 0,
+  reasoning   INTEGER NOT NULL DEFAULT 0,
+  cache_read  INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  replies     INTEGER NOT NULL DEFAULT 0,
+  models_json TEXT NOT NULL DEFAULT '{}',
+  updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS config (
   scope      TEXT NOT NULL,
   name       TEXT NOT NULL,

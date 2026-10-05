@@ -166,6 +166,107 @@ components:
         applied_config_version:
           type: string
           description: Optional. The config version the box last applied ("" for none). Omitted leaves the stored value unchanged.
+        usage: { $ref: '#/components/schemas/UsageReport' }
+    UsageReport:
+      type: object
+      description: |
+        Optional. The session's OpenCode token totals, summed by the box agent from a copy of
+        the attendee's opencode.db (assistant messages only, like hub/deploy/token-usage.sh).
+        Stored only for a session this box owns. Every counter must be an integer 0..1e15; a
+        malformed object (or larger than 16 KB) is ignored, it never fails the call. The hub
+        keeps the highest value seen of each counter and of each model, so a lower report
+        never lowers the stored totals. At most 32 models; names are cleaned to 80 characters.
+      properties:
+        input: { type: integer, format: int64, minimum: 0, example: 120000 }
+        output: { type: integer, format: int64, minimum: 0, example: 30000 }
+        reasoning: { type: integer, format: int64, minimum: 0, example: 4000 }
+        cache_read: { type: integer, format: int64, minimum: 0, example: 900000 }
+        cache_write: { type: integer, format: int64, minimum: 0, example: 0 }
+        replies: { type: integer, format: int64, minimum: 0, description: Assistant messages counted., example: 14 }
+        models:
+          type: object
+          description: Model id to that model's input + output + reasoning tokens.
+          additionalProperties: { type: integer, format: int64, minimum: 0 }
+          example: { 0gm-1.0-35b-a3b: 154000 }
+    Usage:
+      type: object
+      nullable: true
+      description: Stored token totals of one session (the maximum seen of each counter); null when the box never reported any.
+      properties:
+        input: { type: integer, format: int64 }
+        output: { type: integer, format: int64 }
+        reasoning: { type: integer, format: int64 }
+        cache_read: { type: integer, format: int64 }
+        cache_write: { type: integer, format: int64 }
+        replies: { type: integer, format: int64 }
+        models: { type: object, additionalProperties: { type: integer, format: int64 } }
+        updated_at: { type: integer, format: int64, description: Last report. }
+    UsageTotals:
+      type: object
+      description: Every stored session's usage added up (not only the sessions listed).
+      properties:
+        input: { type: integer, format: int64 }
+        output: { type: integer, format: int64 }
+        reasoning: { type: integer, format: int64 }
+        cache_read: { type: integer, format: int64 }
+        cache_write: { type: integer, format: int64 }
+        replies: { type: integer, format: int64 }
+        sessions: { type: integer, description: Sessions with at least one reply. }
+    DashFunding:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        session_id: { type: string }
+        box: { type: string }
+        attendee: { type: string }
+        email: { type: string }
+        telegram: { type: string }
+        wallet: { type: string, example: '0x1234567890abcdef1234567890abcdef12345678' }
+        amount_milli: { type: integer, format: int64, description: milli-0G, example: 500 }
+        amount_og: { type: string, example: '0.5' }
+        status: { type: string, enum: [queued, executing, completed, failed, refused, unknown] }
+        counted: { type: boolean, description: 'Uses up the caps and the budget (queued, executing, completed, unknown).' }
+        tx_hash: { type: string }
+        tx_url: { type: string, description: 'Explorer link (faucet.explorer_tx_url, default https://chainscan-galileo.0g.ai/tx/<hash>); "" unless tx_hash is 0x plus 64 hex.' }
+        detail: { type: string }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    DashReward:
+      type: object
+      properties:
+        session_id: { type: string }
+        box: { type: string }
+        attendee: { type: string }
+        email: { type: string }
+        telegram: { type: string }
+        wallet: { type: string }
+        amount_micros: { type: integer, format: int64, example: 10000000 }
+        amount_usd: { type: string, example: '$10' }
+        outcome: { type: string, enum: [granted, duplicate, rejected, error] }
+        credited: { type: boolean, description: granted or duplicate. }
+        detail: { type: string }
+        created_at: { type: integer, format: int64 }
+    FundingTotals:
+      type: object
+      properties:
+        enabled: { type: boolean, description: The faucet is configured. }
+        funded_milli: { type: integer, format: int64, description: 'Counted transfers since faucet.event_since, the same sum the event budget cap uses.' }
+        funded_og: { type: string, example: '12.5' }
+        completed_milli: { type: integer, format: int64 }
+        completed_og: { type: string }
+        budget_milli: { type: integer, format: int64, description: 'faucet.event_budget_og; 0 when the faucet is off.' }
+        budget_og: { type: string, example: '50' }
+        transfers: { type: integer, description: Every funding row, any status. }
+        wallets: { type: integer, description: Distinct wallets with a counted transfer since event_since. }
+    RewardTotals:
+      type: object
+      properties:
+        enabled: { type: boolean, description: 0G Pay credits are configured. }
+        granted_micros: { type: integer, format: int64 }
+        granted_usd: { type: string, example: '$40' }
+        granted: { type: integer, description: Claims that credited the wallet. }
+        claims: { type: integer, description: Every claim row, any outcome. }
+        per_claim_usd: { type: string, example: '$10', description: '"" when Pay is off.' }
     Command:
       type: object
       required: [id, op, minutes]
@@ -268,6 +369,7 @@ components:
         ended_at: { type: integer, format: int64 }
         reason: { type: string, example: timeout }
         empty: { type: boolean, description: 'true when there was nothing in ~/project to archive. Ignored if an archive was already uploaded.' }
+        usage: { $ref: '#/components/schemas/UsageReport' }
     DashRequest:
       type: object
       nullable: true
@@ -302,6 +404,7 @@ components:
         enrolled_at: { type: integer, format: int64 }
         config_up_to_date: { type: boolean, description: 'config_version == applied_config_version ("keys up to date", else "keys pending, applies at next idle")' }
         status: { type: object }
+        usage: { $ref: '#/components/schemas/Usage' }
     DashSession:
       type: object
       properties:
@@ -328,6 +431,26 @@ components:
         download_url: { type: string, description: 'Staff zip link, empty when there is no archive' }
         public_url: { type: string }
         expires_at: { type: integer, format: int64 }
+        usage: { $ref: '#/components/schemas/Usage' }
+        fundings:
+          type: array
+          description: This session's faucet transfers, newest first; [] when none.
+          items:
+            type: object
+            properties:
+              wallet: { type: string }
+              amount_og: { type: string }
+              status: { type: string }
+              tx_url: { type: string }
+        reward:
+          type: object
+          nullable: true
+          description: This session's 0G Pay claim, null when none.
+          properties:
+            wallet: { type: string }
+            amount_usd: { type: string }
+            outcome: { type: string }
+            credited: { type: boolean }
     DashState:
       type: object
       properties:
@@ -337,6 +460,17 @@ components:
           type: array
           description: Last 200 sessions, newest first.
           items: { $ref: '#/components/schemas/DashSession' }
+        usage_totals: { $ref: '#/components/schemas/UsageTotals' }
+        fundings:
+          type: array
+          description: Newest 300 faucet transfers, newest first (GET /dash/fundings.csv has all).
+          items: { $ref: '#/components/schemas/DashFunding' }
+        rewards:
+          type: array
+          description: Newest 300 reward claims, newest first (GET /dash/rewards.csv has all).
+          items: { $ref: '#/components/schemas/DashReward' }
+        funding_totals: { $ref: '#/components/schemas/FundingTotals' }
+        reward_totals: { $ref: '#/components/schemas/RewardTotals' }
     EnrollRequest:
       type: object
       required: [mac]
@@ -701,7 +835,7 @@ paths:
   /dash/state:
     get:
       tags: [dashboard]
-      summary: Boxes and the last 200 sessions
+      summary: Boxes, the last 200 sessions, token usage, funded wallets and rewards
       responses:
         '200':
           description: Current state.
@@ -847,6 +981,32 @@ paths:
             application/zip:
               schema: { type: string, format: binary }
         '404': { description: 'No archive for that session.' }
+
+  /dash/fundings.csv:
+    get:
+      tags: [dashboard]
+      summary: Every faucet transfer as CSV (staff export)
+      description: |
+        Newest first. Columns: created_at (RFC 3339 UTC), box, session_id, attendee, email,
+        telegram, wallet, amount_og, status, counted (yes/no), tx_hash, tx_url, detail.
+        Cells starting with = + - @ get a leading apostrophe. Same guards as /dash/*.
+      responses:
+        '200': { description: 'CSV attachment fundings.csv.', content: { text/csv: { schema: { type: string } } } }
+        '403': { description: 'Called from a hack-box address.' }
+        '404': { description: 'Came through the tunnel.' }
+
+  /dash/rewards.csv:
+    get:
+      tags: [dashboard]
+      summary: Every 0G Pay reward claim as CSV (staff export)
+      description: |
+        Newest first. Columns: created_at (RFC 3339 UTC), box, session_id, attendee, email,
+        telegram, wallet, amount_usd, outcome, credited (yes/no), detail. Same CSV rules and
+        guards as /dash/fundings.csv.
+      responses:
+        '200': { description: 'CSV attachment rewards.csv.', content: { text/csv: { schema: { type: string } } } }
+        '403': { description: 'Called from a hack-box address.' }
+        '404': { description: 'Came through the tunnel.' }
 
   /dash/config:
     get:
