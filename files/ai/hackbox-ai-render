@@ -300,18 +300,17 @@ def opencode_config():
                 "models": models,
             }
         },
-        # mirrors Claude Code acceptEdits: edits run, shell asks except an allowlist
+        # Auto mode: edits and shell commands run without asking (the attendee account has
+        # no sudo and the home is wiped after every session). Privilege tools stay denied,
+        # and a repeating loop still asks, so a runaway agent cannot burn the credit.
         "permission": {
             "edit": "allow",
             "webfetch": "allow",
             "bash": {
-                "*": "ask",
-                "ls *": "allow", "cat *": "allow", "pwd": "allow", "git *": "allow",
-                "node *": "allow", "npm *": "allow", "npx *": "allow", "pnpm *": "allow",
-                "forge *": "allow", "cast *": "allow", "anvil *": "allow",
+                "*": "allow",
                 "sudo *": "deny", "su *": "deny", "pkexec *": "deny",
             },
-            "external_directory": "ask",
+            "external_directory": "allow",
             "doom_loop": "ask",
         },
         "compaction": {"auto": True, "prune": True},
