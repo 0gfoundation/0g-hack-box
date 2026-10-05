@@ -31,6 +31,23 @@ Screens on the box are drawn by the overlay. Pages on a phone or laptop are serv
    The agent runs `hackbox extend <min>` or `hackbox end` and reports
    `POST /api/v1/commands/{id}/result`. The pill shows the new time.
 
+### 2a. Testnet 0G for a wallet (box, the attendee's agent)
+
+1. The agent creates a wallet (or the attendee names one) and needs gas on Galileo to deploy.
+   Its 0G pointer (`~/.config/opencode/AGENTS.md`, `~/.claude/CLAUDE.md`) says: run
+   `0g-fund <wallet address>`, do not send the user to a faucet website.
+2. `0g-fund` reads the session link from `/run/hackbox/hub-url` and posts the address to
+   `<link>/fund` on the hub's public host (the box cannot reach the tailnet). It prints
+   "Sending 0.5 0G to 0x...", polls `GET <link>/fund?wallet=` every 3 s and prints the
+   transaction hash and the chainscan link when the faucet confirms (usually seconds, at most
+   2 minutes, then "Still on its way", exit 3).
+3. The same command again says "This session already funded 0x...", never sends twice.
+   `0g-fund --status` lists the session's transfers and what is left (1 0G per session).
+4. Refusals come back as one sentence the agent can act on: the session is not running; the
+   session, wallet, box hour or event allowance is used up; the faucet sent this wallet 0G in
+   the last 24 hours (shared with the public faucet, with the time it can get more: "fund a
+   new wallet instead"); the faucet did not answer ("run the same command again").
+
 ### 3. Ask for more time (box)
 
 1. The attendee presses "Ask for more time".
@@ -214,6 +231,6 @@ box.
 ### 8. API test page
 
 `/dash/api_test.html` (tailnet only) exercises every box and dashboard call against the hub
-with a bearer token field, plus enrollment. Useful to fake a box before the real agent runs.
+with a bearer token field, plus enrollment and the public `/d/{token}/fund` calls. Useful to fake a box before the real agent runs.
 A successful box call from your laptop locks your laptop out of the dashboard for 24 hours
 (the box address guard); run box calls from the hub host (localhost is exempt).

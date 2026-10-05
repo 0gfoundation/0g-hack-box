@@ -7,6 +7,7 @@
 #   /usr/local/sbin/hackbox-ai-render     writes the managed configs and the manifest
 #   /usr/local/lib/hackbox/ai/key         Claude Code apiKeyHelper
 #   /usr/local/bin/hackbox-agent          the manifest's launch command
+#   /usr/local/bin/0g-fund                testnet 0G for a wallet, through the session hub
 #   /etc/hackbox/reset.d/50-ai-seed       seeds agent state into every fresh home
 #   /opt/0g-agent-skills                  the 0G agent skills, which every fresh home's
 #                                         ~/.claude/CLAUDE.md and opencode AGENTS.md point at
@@ -48,6 +49,7 @@ sudo install -d -m 0755 /usr/local/lib/hackbox /usr/local/lib/hackbox/ai /etc/cl
 sudo install -m 0755 "$A/hackbox-ai-render" /usr/local/sbin/hackbox-ai-render
 sudo install -m 0755 "$A/key" /usr/local/lib/hackbox/ai/key
 sudo install -m 0755 "$A/hackbox-agent" /usr/local/bin/hackbox-agent
+sudo install -m 0755 "$A/0g-fund" /usr/local/bin/0g-fund
 sudo install -m 0755 "$A/50-ai-seed" /etc/hackbox/reset.d/50-ai-seed
 sudo install -m 0755 "$A/hackbox-skills-update" /usr/local/sbin/hackbox-skills-update
 # 0G agent skills (refresh later with `hackbox skills update`). A network hiccup here must

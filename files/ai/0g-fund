@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""0g-fund: get testnet 0G (Galileo) for a wallet during a hack-box session.
+
+    0g-fund <address>          ask for testnet 0G, wait for the transaction, print its hash
+    0g-fund --status [address] show this session's transfers without asking for more
+    0g-fund --no-wait <address> ask, print the reply, do not wait
+
+Installed to /usr/local/bin. The request goes to the session hub's public URL (the one in
+/run/hackbox/hub-url), which holds the faucet key and applies the limits; this box never
+holds a key. Works only while the session is running. Repeating a call for the same
+address never sends twice.
+
+Exit codes: 0 funded (or already funded), 1 refused or failed, 2 usage or setup problem,
+3 still pending when the wait ran out.
+"""
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+HUB_URL_FILE = os.environ.get("HACKBOX_HUB_URL_FILE", "/run/hackbox/hub-url")
+WAIT_SECONDS = int(os.environ.get("HACKBOX_FUND_WAIT", "120"))
+ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def die(msg, code=2):
+    print("0g-fund: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def session_url():
+    try:
+        with open(HUB_URL_FILE) as fh:
+            url = fh.read().strip()
+    except OSError:
+        die("no session link in %s: this only works on a hack-box during a session." % HUB_URL_FILE)
+    if not re.match(r"^https?://[^\s]+/d/[A-Za-z0-9]+$", url):
+        die("%s does not hold a session link." % HUB_URL_FILE)
+    return url + "/fund"
+
+
+def call(method, url, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "hackbox-0g-fund/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw or b"{}")
+        except ValueError:
+            return e.code, {"message": raw.decode("utf-8", "replace")[:200] or e.reason}
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        die("could not reach the session hub (%s). Check the internet connection and try again." % e, 1)
+
+
+def show(t):
+    line = "%s  %s 0G  %s" % (t.get("wallet", "?"), t.get("amount", "?"), t.get("status") or t.get("outcome", "?"))
+    if t.get("tx_hash"):
+        line += "  tx " + t["tx_hash"]
+    print(line)
+
+
+def status(url, wallet):
+    q = "?wallet=" + urllib.parse.quote(wallet) if wallet else ""
+    code, out = call("GET", url + q)
+    if code != 200:
+        die(out.get("message") or out.get("error") or "HTTP %d" % code, 1)
+    print("session %s, %s 0G per transfer, %s of %s 0G left this session" % (
+        "running" if out.get("active") else "not running", out.get("amount"),
+        out.get("session_remaining"), out.get("session_max")))
+    for t in out.get("transfers", []):
+        show(t)
+    if not out.get("transfers"):
+        print("no transfers yet")
+
+
+def main(argv):
+    wait = True
+    args = [a for a in argv if not a.startswith("-")]
+    flags = [a for a in argv if a.startswith("-")]
+    if "-h" in flags or "--help" in flags:
+        print(__doc__.strip())
+        return 0
+    url = session_url()
+    if "--status" in flags:
+        status(url, args[0] if args else "")
+        return 0
+    if "--no-wait" in flags:
+        wait = False
+    if len(args) != 1 or not ADDR.match(args[0].strip()):
+        die("usage: 0g-fund <0x address of 40 hex characters>  (or --status)")
+    wallet = args[0].strip()
+
+    code, out = call("POST", url, {"wallet": wallet})
+    print(out.get("message") or out.get("error") or "HTTP %d" % code)
+    outcome = out.get("outcome", "")
+    if outcome in ("completed", "already"):
+        if out.get("explorer_url"):
+            print(out["explorer_url"])
+        return 0
+    if outcome not in ("queued", "executing") or not wait:
+        return 0 if outcome in ("queued", "executing") else 1
+
+    deadline = time.time() + WAIT_SECONDS
+    last = outcome
+    while time.time() < deadline:
+        time.sleep(3)
+        code, out = call("GET", url + "?wallet=" + urllib.parse.quote(wallet))
+        if code != 200 or not out.get("transfers"):
+            continue
+        t = out["transfers"][0]
+        st = t.get("status") or t.get("outcome")
+        if st != last:
+            print(t.get("message", st))
+            last = st
+        if st == "completed":
+            if t.get("tx_hash"):
+                print("tx_hash " + t["tx_hash"])
+            if t.get("explorer_url"):
+                print(t["explorer_url"])
+            return 0
+        if st == "failed":
+            return 1
+    print("Still on its way after %d s. Check later with: 0g-fund --status %s" % (WAIT_SECONDS, wallet))
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

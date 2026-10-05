@@ -64,6 +64,11 @@ type Server struct {
 	payHTTP    *http.Client
 	payLimiter *rateLimiter
 	payMu      sync.Mutex
+	// faucet funding (faucet.go): fundMu serialises POST /d/{token}/fund so the caps hold.
+	faucetHTTP      *http.Client
+	fundLimiter     *rateLimiter
+	fundReadLimiter *rateLimiter
+	fundMu          sync.Mutex
 }
 
 // New opens the database under DataDir and returns a ready Server.
@@ -115,6 +120,18 @@ func New(o Options) (*Server, error) {
 		s.log.Printf("pay: compute credits on, %s per session, %d per wallet, signer %s",
 			s.cfg.Pay.amountUSD(), s.cfg.Pay.MaxPerWallet, s.pay.address)
 	}
+	s.faucetHTTP = &http.Client{Timeout: 20 * time.Second}
+	s.fundLimiter = newRateLimiter(s.cfg.Faucet.IPPerMinute, time.Minute, s.now)
+	s.fundReadLimiter = newRateLimiter(10*max(s.cfg.Faucet.IPPerMinute, 30), time.Minute, s.now)
+	if f := s.cfg.Faucet; f.enabled() {
+		mode := "fixed drip"
+		if f.PromoCode != "" {
+			mode = "promo code"
+		}
+		s.log.Printf("faucet: funding on via %s (%s), %s 0G per transfer, caps %s per session, %s per wallet, %s per box hour, %s per event",
+			f.APIURL, mode, fmtOG(milli(f.AmountOG)), fmtOG(milli(f.SessionMaxOG)), fmtOG(milli(f.WalletMaxOG)),
+			fmtOG(milli(f.BoxHourlyMaxOG)), fmtOG(milli(f.EventBudgetOG)))
+	}
 	s.gh = newGitHubWorker(s, o.GitHubAPI, o.GitHubPush, o.GitCmd)
 	if err := s.gh.requeueDisabled(); err != nil {
 		db.Close()
@@ -147,6 +164,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /d/{token}", s.pageDownload)
 	mux.HandleFunc("GET /d/{token}/download", s.pageDownloadZip)
 	mux.HandleFunc("POST /d/{token}/credit", s.pageCredit)
+	mux.HandleFunc("POST /d/{token}/fund", s.pageFund)
+	mux.HandleFunc("GET /d/{token}/fund", s.pageFundStatus)
 	mux.HandleFunc("GET /code", s.pageCode)
 	mux.HandleFunc("GET /c/{code}", s.pageShort)
 	mux.HandleFunc("POST /code", s.pageCodePost)

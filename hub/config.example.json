@@ -17,5 +17,18 @@
     "expires_at": "",
     "spend_url": "https://pc.0g.ai",
     "expiry_label": "13 October 2026"
+  },
+  "faucet": {
+    "api_url": "https://faucet-api.udhaykumarbala.dev",
+    "api_key": "",
+    "promo_code": "",
+    "amount_og": 0.5,
+    "session_max_og": 1,
+    "wallet_max_og": 1,
+    "box_hourly_max_og": 2,
+    "event_budget_og": 50,
+    "event_since": "",
+    "ip_per_minute": 30,
+    "ref_tag": "hackbox"
   }
 }
