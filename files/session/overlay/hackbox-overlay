@@ -528,6 +528,155 @@ def skyline():
     return img
 
 
+def svg_pixbuf(svg, width, height):
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.set_size(int(width), int(height))
+        loader.write(svg.encode())
+        loader.close()
+        return loader.get_pixbuf()
+    except GLib.Error:
+        return None
+
+
+def xml_text(s):
+    return GLib.markup_escape_text(s or "")
+
+
+# The welcome face's two side pieces, drawn tilted into the empty space beside the card: a
+# reward ticket (left) and a rectangular Hacker Zone passport stamp (right). Each SVG holds its
+# own rotation, so GTK only places and animates a flat image.
+def ticket_svg(reward):
+    m = re.match(r"\s*(\$?[\d.,]+\S*)\s+(.*)$", reward or "")
+    big, rest = (m.group(1), m.group(2)) if m else (reward, "")
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 420">
+<defs>
+<linearGradient id="tk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f1e9ff"/></linearGradient>
+<mask id="notch"><rect x="0" y="0" width="400" height="300" fill="#fff"/><circle cx="0" cy="206" r="16" fill="#000"/><circle cx="400" cy="206" r="16" fill="#000"/></mask>
+<filter id="sh" x="-20%%" y="-20%%" width="140%%" height="150%%"><feGaussianBlur in="SourceAlpha" stdDeviation="12"/><feOffset dy="16"/><feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<g transform="translate(250 210) rotate(-9) translate(-200 -150)" filter="url(#sh)">
+<g mask="url(#notch)">
+<rect x="0" y="0" width="400" height="300" rx="22" fill="url(#tk)"/>
+<text x="32" y="52" font-family="Ubuntu Mono, monospace" font-weight="700" font-size="15" letter-spacing="4" fill="#6a55c8">EARN 0G</text>
+<text x="30" y="140" font-family="Ubuntu, sans-serif" fill="#2a1d6e"><tspan font-size="88" font-weight="800" letter-spacing="-3">%s</tspan><tspan font-size="30" font-weight="700" dx="10">free</tspan></text>
+<text x="32" y="180" font-family="Ubuntu, sans-serif" font-size="22" font-weight="700" fill="#2a1d6e">%s</text>
+<line x1="0" y1="206" x2="400" y2="206" stroke="#6a55c8" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="8 6"/>
+<text font-family="Ubuntu, sans-serif" font-size="17" fill="#4b3a9a"><tspan x="32" y="246">When time is up, scan the QR to download</tspan><tspan x="32" y="270">your project and claim it.</tspan></text>
+</g>
+</g>
+</svg>""" % (xml_text(big), xml_text(rest))
+
+
+def stamp_svg(conf):
+    line = conf.get("EVENT_LINE") or ""
+    year = (re.findall(r"\d{4}", line) or [""])[-1]
+    city = line.replace(".", " ").split()[-1] if line.split() else ""
+    top = " . ".join(p for p in ("0G", conf.get("EVENT_TITLE") or "", year) if p)
+    ink = "#ff8cc0"
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 560">
+<defs>
+<filter id="grunge" x="-5%%" y="-5%%" width="110%%" height="110%%">
+<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7" result="n"/>
+<feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.1 1.75" result="holes"/>
+<feComposite in="SourceGraphic" in2="holes" operator="in" result="inked"/>
+<feTurbulence type="turbulence" baseFrequency="0.035" numOctaves="2" seed="3" result="w"/>
+<feDisplacementMap in="inked" in2="w" scale="2"/>
+</filter>
+</defs>
+<g transform="translate(280 280) rotate(8) translate(-220 -235)">
+<g filter="url(#grunge)" fill="none" stroke="{ink}">
+<rect x="3" y="3" width="434" height="324" rx="10" stroke-width="6"/>
+<rect x="17" y="17" width="406" height="296" rx="4" stroke-width="2"/>
+<g stroke="none" fill="{ink}" text-anchor="middle">
+<text x="220" y="62" font-family="Ubuntu Mono, monospace" font-weight="700" font-size="18" letter-spacing="7">{top}</text>
+<text x="220" y="142" font-family="Ubuntu, sans-serif" font-weight="700" font-size="74" letter-spacing="2">HACKER</text>
+<text x="220" y="214" font-family="Ubuntu, sans-serif" font-weight="700" font-size="74" letter-spacing="2">ZONE</text>
+<text x="220" y="250" font-family="Ubuntu Mono, monospace" font-weight="700" font-size="17" letter-spacing="4">{city}</text>
+<text x="224" y="292" font-family="Ubuntu Mono, monospace" font-weight="800" font-size="22" letter-spacing="8">BUILT</text>
+</g>
+<line x1="50" y1="244" x2="140" y2="244" stroke-width="2"/>
+<line x1="300" y1="244" x2="390" y2="244" stroke-width="2"/>
+<rect x="158" y="266" width="124" height="36" stroke-width="2"/>
+</g>
+<g transform="rotate(-10 220 400)" font-family="Ubuntu, sans-serif" font-size="21" fill="#ffffff" fill-opacity="0.92">
+<text x="24" y="378"><tspan font-weight="700" fill-opacity="1">Get stamped.</tspan> Show your build to staff</text>
+<text x="24" y="406">for the Hacker Zone stamp on your event</text>
+<text x="24" y="434">passport. Stamps count toward the final</text>
+<text x="24" y="462">prize.</text>
+</g>
+</g>
+</svg>""".replace("%%", "%").format(ink=ink, top=xml_text(top), city=xml_text(city))
+
+
+def ease_back(p):
+    """Ease out with a small overshoot, like CSS cubic-bezier(.2,1.3,.4,1)."""
+    c = 1.4
+    p -= 1
+    return 1 + (c + 1) * p * p * p + c * p * p
+
+
+class Art(Gtk.DrawingArea):
+    """A flat image with an entrance animation, drawn only while it is on screen.
+    'slide': slides in from the left, holds, fades, and replays every `every` seconds.
+    'thump': drops in from 1.9x scale once each time it is shown (a stamp landing)."""
+
+    def __init__(self, pixbuf, kind, delay=0.2, every=7.0):
+        super().__init__()
+        self.pix, self.kind, self.delay, self.every = pixbuf, kind, delay, every
+        self.pad = int(pixbuf.get_width() * 0.12) if kind == "slide" else 0
+        self.set_size_request(pixbuf.get_width() + self.pad, pixbuf.get_height())
+        self.t0, self.timer = None, None
+        self.connect("draw", self._draw)
+        self.connect("map", self._start)
+        self.connect("unmap", self._stop)
+
+    def _start(self, *_):
+        self.t0 = time.monotonic()
+        if self.timer is None:
+            self.timer = GLib.timeout_add(33, self._tick)
+
+    def _stop(self, *_):
+        if self.timer is not None:
+            GLib.source_remove(self.timer)
+            self.timer = None
+
+    def _tick(self):
+        self.queue_draw()
+        if self.kind == "thump" and time.monotonic() - self.t0 > self.delay + 1.0:
+            self.timer = None
+            return False                    # landed: no more frames until shown again
+        return True
+
+    def _frame(self):
+        """(alpha, x offset, scale) for now."""
+        t = time.monotonic() - (self.t0 or 0) - self.delay
+        if t < 0:
+            return 0.0, 0.0, 1.0
+        if self.kind == "thump":
+            p = min(1.0, t / 0.55)
+            return min(1.0, p / 0.7), 0.0, 1.9 - 0.9 * ease_back(p)
+        t %= self.every
+        if t < 0.7:
+            p = t / 0.7
+            return min(1.0, p / 0.6), -self.pad * (1 - ease_back(p)), 1.0
+        if t > self.every - 0.3:
+            return max(0.0, (self.every - t) / 0.3), 0.0, 1.0
+        return 1.0, 0.0, 1.0
+
+    def _draw(self, _w, cr):
+        alpha, dx, scale = self._frame()
+        if alpha <= 0:
+            return False
+        w, h = self.pix.get_width(), self.pix.get_height()
+        cx, cy = self.pad + w / 2.0, h / 2.0
+        cr.translate(cx + dx, cy)
+        cr.scale(scale, scale)
+        Gdk.cairo_set_source_pixbuf(cr, self.pix, -w / 2.0, -h / 2.0)
+        cr.paint_with_alpha(alpha)
+        return False
+
+
 def logo(height):
     """The 0G mark (assets/0g-logo-white.png); the drawn SVG if the file is missing."""
     try:
@@ -624,14 +773,41 @@ class FullScreen(Gtk.Window):
         box.set_valign(Gtk.Align.CENTER)
         return box
 
+    def _side_art(self):
+        """The reward ticket and the Hacker Zone stamp for the welcome face's side space, or
+        an empty list when the screen is too narrow for them beside the card."""
+        conf, f = self.app.conf, scale_factor()
+        side = (primary_geometry().width - 720 * f) / 2.0
+        if side < 300 * f:
+            return []
+        out = []
+        reward = conf.get("REWARD_TEXT") if self.app.hub else ""
+        if reward:
+            k = min(f, side * 0.8 / 560)              # the slide needs 12 % extra width
+            pix = svg_pixbuf(ticket_svg(reward), 500 * k, 420 * k)
+            if pix:
+                art = Art(pix, "slide", delay=0.2, every=7.0)
+                art.set_halign(Gtk.Align.START)
+                art.set_margin_start(int(max(16, (side - 560 * k) / 2)))
+                out.append(art)
+        k = min(f, side * 0.85 / 560)
+        pix = svg_pixbuf(stamp_svg(conf), 560 * k, 560 * k)
+        if pix:
+            art = Art(pix, "thump", delay=1.1)
+            art.set_halign(Gtk.Align.END)
+            art.set_margin_end(int(max(16, (side - 560 * k) / 2)))
+            out.append(art)
+        for art in out:
+            art.set_valign(Gtk.Align.CENTER)
+        return out
+
     def _build_welcome(self):
         conf = self.app.conf
-        minutes = as_int(conf["SESSION_MINUTES"], 30)
         box = self._column()
         box.set_spacing(int(16 * scale_factor()))
         box.pack_start(lockup(conf), False, False, 0)
-        box.pack_start(label("Build something on 0G in %d minutes." % minutes, "hb-title"),
-                       False, False, 0)
+        box.pack_start(label("Build on 0G & Earn 0G", "hb-title"), False, False, 0)
+        art = self._side_art()
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=int(14 * scale_factor()))
         card.get_style_context().add_class("hb-card")
@@ -671,14 +847,22 @@ class FullScreen(Gtk.Window):
         if self.app.hub:
             rules += "\nYou get a QR code to download your project at the end."
         reward = self.app.conf.get("REWARD_TEXT") if self.app.hub else ""
-        if reward:
+        if reward and not any(a.kind == "slide" for a in art):
+            # No room for the ticket: say it in a line instead.
             box.pack_start(label("Finish your session and claim " + reward + ".", "hb-body"),
                            False, False, 0)
         rules += "\nNever enter personal passwords, wallet seeds or private keys here."
         box.pack_start(label(rules, "hb-muted", wrap=True), False, False, 0)
         box.pack_start(label(socket.gethostname().upper(), "hb-tiny"), False, False, 4)
         self._name_changed()
-        return box
+        if not art:
+            return box
+        face = Gtk.Overlay()
+        face.add(box)
+        for a in art:
+            face.add_overlay(a)
+            face.set_overlay_pass_through(a, True)    # clicks go to whatever is beneath
+        return face
 
     def attendee_name(self):
         if self.name_entry is None:
