@@ -448,7 +448,13 @@ class Agent:
         live["early_upload"] = True          # once per session, also when it fails
         save_json(CURRENT, live)
         if not code:
-            return                           # nothing new in ~/project
+            # Nothing new in ~/project: say so now, or the download page shows Preparing until
+            # Done. The upload job after the reset posts the same end again (idempotent).
+            hub.call("POST", "/api/v1/sessions/%s/end" % live["session_id"], {
+                "ended_at": int(time.time()), "reason": live.get("reason") or "ended_early",
+                "empty": True})
+            log("session %s ended with nothing to save (told the hub early)" % live["session_id"])
+            return
         r = subprocess.run([ARCHIVE_CMD, "create", code], capture_output=True, text=True,
                            timeout=120)
         path = self.archive_path(code)

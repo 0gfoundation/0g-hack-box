@@ -125,6 +125,14 @@ HUB_PID=$!
 check "queued job delivered after the hub is back" wait_for "[ -z \"\$(ls $T/state/jobs)\" ]"
 check "late session registered with its name" wait_for "curl -fs $STATE | grep -q 'Grace Hopper'"
 
+# --- nothing saved: the page must not wait for Done ---
+printf 'Empty Person\nopencode\n' > "$T/home/attendee"
+echo $(( $(date +%s) + 1800 )) > "$RUN/session-end"; rm -f "$RUN/code"; echo active > "$RUN/state"
+check "empty session registered" wait_for "[ \"\$(cat $RUN/attendee 2>/dev/null)\" = 'Empty Person' ]"
+EURL=$(cat "$RUN/hub-url"); echo ending > "$RUN/state"
+check "empty session shows nothing to save before Done" wait_for "curl -fs '$EURL' | grep -qi 'nothing to save'"
+echo resetting > "$RUN/state"; sleep 0.6; echo "none $(date +%s)" > "$RUN/last-archive"; echo idle > "$RUN/state"; sleep 2
+
 # --- agent keys from the dashboard: applied only while idle ---
 CFG=http://127.0.0.1:$PORT/dash/config
 post() { curl -fs -X POST -H 'Content-Type: application/json' -d "$1" "$CFG" >/dev/null; }
