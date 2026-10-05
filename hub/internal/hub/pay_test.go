@@ -385,3 +385,25 @@ func TestClientIPBehindProxy(t *testing.T) {
 		t.Fatal("short proxy_key accepted")
 	}
 }
+
+// On the time-up screen (box state "ending" for this session) the reward opens while the
+// files are still being saved; during the session it stays closed.
+func TestCreditOnTimeUpScreen(t *testing.T) {
+	e, _ := payEnv(t)
+	a := e.create(tok1, "Grace Hopper")
+	heartbeat(e, tok1, map[string]any{"state": "active", "session_id": a.ID})
+	if c, _ := claim(e, a.Token, walletA); c != 409 {
+		t.Fatalf("claim during the session: %d, want 409", c)
+	}
+	heartbeat(e, tok1, map[string]any{"state": "ending", "session_id": a.ID})
+	w := e.do("GET", "/d/"+a.Token, nil, nil)
+	if !strings.Contains(w.Body.String(), "preparing your files") || !strings.Contains(w.Body.String(), "Connect wallet") {
+		t.Fatal("time-up screen: preparing page should offer the reward")
+	}
+	if strings.Contains(w.Body.String(), `http-equiv="refresh"`) {
+		t.Fatal("preparing page with the reward must not reload by itself")
+	}
+	if c, r := claim(e, a.Token, walletA); c != 200 || r.Outcome != "granted" {
+		t.Fatalf("claim on the time-up screen: %d %+v", c, r)
+	}
+}

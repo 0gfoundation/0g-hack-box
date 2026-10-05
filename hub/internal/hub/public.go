@@ -109,7 +109,7 @@ input[type=text]:focus{outline:2px solid var(--accent);border-color:transparent}
   <a class="btn" href="/code">Try again</a>
 {{end}}
 </div>
-{{if and .Pay.Enabled (or (eq .State "ready") (eq .State "empty"))}}
+{{if and .Pay.Enabled (or (eq .State "ready") (eq .State "empty") (and (eq .State "preparing") .Pay.TimeUp))}}
 <div class="credit">
   <div id="offer"{{if .Pay.Done}} hidden{{end}}>
     <span class="pill ok">Reward</span>
@@ -187,6 +187,16 @@ input[type=text]:focus{outline:2px solid var(--accent);border-color:transparent}
     }).catch(function (e) { say(e && e.code === 4001 ? 'Connection cancelled.' : 'Wallet error: ' + (e && e.message || e), 'bad'); busy(false); });
   });
   cp.addEventListener('click', function () { claim(document.getElementById('addr').value); });
+  // Preparing: wait for the files without reloading over a claim in progress.
+  if (document.querySelector('.pill.warn') && /preparing/i.test(document.querySelector('h1').textContent)) {
+    var addr = document.getElementById('addr');
+    setInterval(function () {
+      if (cw.disabled || document.activeElement === addr || (addr && addr.value)) return;
+      fetch(location.href, {cache: 'no-store'}).then(function (r) { return r.text(); }).then(function (t) {
+        if (t.indexOf('your project is ready') >= 0 || t.indexOf('nothing to save') >= 0) location.reload();
+      }).catch(function () {});
+    }, 3000);
+  }
 })();
 </script>
 {{end}}
@@ -279,7 +289,11 @@ func (s *Server) pageDownload(w http.ResponseWriter, r *http.Request) {
 	case "expired":
 		code = http.StatusGone
 	case "preparing":
-		d.Refresh = 3
+		// With the reward card on the page a reload would cut a claim short: the page
+		// script polls instead and reloads only when the files are ready and no claim runs.
+		if !(d.Pay.Enabled && d.Pay.TimeUp) {
+			d.Refresh = 3
+		}
 	}
 	s.renderPage(w, code, d)
 }

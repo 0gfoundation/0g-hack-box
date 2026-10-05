@@ -41,6 +41,7 @@ CONF = os.environ.get("HB_HUB_CONF", "/etc/hackbox/hub.conf")
 NAME_FILE = os.environ.get("HB_NAME_FILE", "/home/hacker/.cache/hackbox/attendee")
 HACKER_UID = int(os.environ.get("HB_HACKER_UID", "2000"))
 HACKBOX = os.environ.get("HB_HACKBOX_CMD", "/usr/local/bin/hackbox")
+ARCHIVE_CMD = os.environ.get("HB_ARCHIVE_CMD", "/usr/local/sbin/hackbox-archive")
 TICK = float(os.environ.get("HB_TICK", "1"))
 BEAT_EVERY = float(os.environ.get("HB_BEAT_EVERY", "3"))
 JOB_BACKOFF_MAX = float(os.environ.get("HB_JOB_BACKOFF_MAX", "300"))
@@ -438,6 +439,27 @@ class Agent:
 
     # -- main loop --
 
+    def early_upload(self, hub, live):
+        """On the time-up screen, before Done: archive ~/project now and upload it, so the
+        download link works while the attendee is still looking at the QR code. The reset
+        archives again after Done (same code, files closed) and the upload job replaces
+        this copy with that one. Tolerates files changing while read (hackbox-archive)."""
+        code = read_run("code")
+        live["early_upload"] = True          # once per session, also when it fails
+        save_json(CURRENT, live)
+        if not code:
+            return                           # nothing new in ~/project
+        r = subprocess.run([ARCHIVE_CMD, "create", code], capture_output=True, text=True,
+                           timeout=120)
+        path = self.archive_path(code)
+        if r.returncode != 0 or not os.path.exists(path):
+            log("early archive %s failed: %s" % (code, (r.stderr or r.stdout).strip()[-200:]))
+            return
+        with open(path, "rb") as f:
+            hub.call("PUT", "/api/v1/sessions/%s/archive" % live["session_id"], raw=f,
+                     length=os.path.getsize(path), timeout=600)
+        log("early upload of %s for session %s" % (code, live["session_id"]))
+
     def step(self):
         conf = load_conf()
         state = read_run("state") or "idle"
@@ -455,6 +477,8 @@ class Agent:
                 save_json(CURRENT, live)
                 self.publish_links(hub)
                 log("session registered: %s" % live["url"])
+            if live and live.get("session_id") and state == "ending" and not live.get("early_upload"):
+                self.early_upload(hub, live)
             if time.time() - self.last_beat >= BEAT_EVERY:
                 self.last_beat = time.time()
                 self.heartbeat(hub, state)

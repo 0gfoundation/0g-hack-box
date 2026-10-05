@@ -44,8 +44,16 @@ case "\$1" in
 esac
 EOF
 chmod +x "$T/hackbox"
+cat > "$T/hackbox-archive" <<EOF
+#!/bin/bash
+# fake hackbox-archive: create <code> writes a small tarball of a fake project
+[ "\$1" = create ] || exit 0
+mkdir -p "$T/proj/project"; echo early > "$T/proj/project/early.txt"
+tar -C "$T/proj" -czf "$T/archive/\$2.tar.gz" project
+EOF
+chmod +x "$T/hackbox-archive"
 export HB_RUN=$RUN HB_STATE_DIR=$T/state HB_ARCHIVE_DIR=$T/archive HB_HUB_CONF=$T/hub.conf \
-  HB_NAME_FILE=$T/home/attendee HB_HACKER_UID=$(id -u) HB_HACKBOX_CMD=$T/hackbox \
+  HB_NAME_FILE=$T/home/attendee HB_HACKER_UID=$(id -u) HB_HACKBOX_CMD=$T/hackbox HB_ARCHIVE_CMD=$T/hackbox-archive \
   HB_SKIP_PERM_CHECK=1 HB_TICK=0.3 HB_BEAT_EVERY=0.5 HB_JOB_BACKOFF_MAX=1 HB_HUB_BACKOFF_MAX=1
 echo idle > "$RUN/state"
 python3 "$REPO/files/hub/hackbox-hubagent" 2>"$T/agent.log" &
@@ -88,7 +96,9 @@ curl -fs -X POST -H 'Content-Type: application/json' -d '{"minutes":5}' \
 check "staff +5 runs 'hackbox extend 5'" wait_for "grep -qx 'extend 5' $T/commands.log"
 
 # --- end, archive, upload ---
-echo ending > "$RUN/state"; echo ABCDEF > "$RUN/code"; sleep 1.5
+echo ABCDEF > "$RUN/code"; echo ending > "$RUN/state"
+check "download ready on the time-up screen, before Done" wait_for "curl -fs '$URL' | grep -qi download"
+sleep 1
 curl -fs -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/dash/boxes/hackbox9/finish" >/dev/null
 check "staff Finish sets the Done flag on the box" wait_for "[ -e $RUN/ending-done ]"
 mkdir -p "$T/proj/project/src"; echo 'console.log("hi")' > "$T/proj/project/src/index.js"

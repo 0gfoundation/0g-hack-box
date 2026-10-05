@@ -350,6 +350,18 @@ type payState struct {
 	SpendURL string
 	SpendAt  string // host of SpendURL, for the button text
 	Expiry   string // "13 October 2026" or ""
+	TimeUp   bool   // the box shows this session's time-up screen (claims allowed while preparing)
+}
+
+// onTimeUp: the session's box reports it is on the time-up screen for this very session. A
+// session is "preparing" from its start, so preparing alone must not open the claim: the
+// download link is readable on the box during the session.
+func (s *Server) onTimeUp(ss *Session) bool {
+	var state, sid string
+	if err := s.db.QueryRow(`SELECT state, session_id FROM boxes WHERE name = ?`, ss.Box).Scan(&state, &sid); err != nil {
+		return false
+	}
+	return state == "ending" && sid == ss.ID
 }
 
 func shortWallet(w string) string {
@@ -365,6 +377,7 @@ func (s *Server) payStateFor(ss *Session) payState {
 	if !st.Enabled {
 		return st
 	}
+	st.TimeUp = s.onTimeUp(ss)
 	st.SpendAt = strings.TrimPrefix(strings.TrimRight(strings.TrimPrefix(st.SpendURL, "https://"), "/"), "www.")
 	if c, err := s.creditBySession(ss.ID); err == nil && credited(c.Outcome) {
 		st.Done = true
@@ -406,8 +419,10 @@ func (s *Server) pageCredit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusGone, creditReply{Outcome: "error", Message: "This link has expired."})
 		return
 	case "preparing":
-		writeJSON(w, http.StatusConflict, creditReply{Outcome: "error", Message: "The session is still being saved. Try again in a moment."})
-		return
+		if !s.onTimeUp(ss) {
+			writeJSON(w, http.StatusConflict, creditReply{Outcome: "error", Message: "The reward opens when your session ends. Try again on the time-up screen."})
+			return
+		}
 	}
 	var in struct {
 		Wallet string `json:"wallet"`

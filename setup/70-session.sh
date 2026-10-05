@@ -36,6 +36,11 @@ done
 sudo install -d -m 0755 /usr/local/lib/hackbox
 sudo install -m 0755 -o root -g root "$S/overlay/hackbox-overlay" /usr/local/lib/hackbox/hackbox-overlay
 sudo install -d -m 0755 /usr/local/lib/hackbox/assets
+# Event screens (reward line, start page) and Firefox without first-run pages, since every
+# session starts with a fresh profile.
+sudo install -m 0644 -o root -g root "$HERE/files/conf/37-event.conf" /etc/hackbox/conf.d/37-event.conf
+sudo install -d -m 0755 /etc/firefox/policies
+sudo install -m 0644 -o root -g root "$S/firefox-policies.json" /etc/firefox/policies/policies.json
 sudo install -m 0644 -o root -g root "$S"/overlay/assets/* /usr/local/lib/hackbox/assets/
 sudo install -m 0755 -o root -g root "$HERE/files/hub/hackbox-hubagent" /usr/local/lib/hackbox/hackbox-hubagent
 sudo ln -sfn "$HERE/bin/hackbox" /usr/local/bin/hackbox

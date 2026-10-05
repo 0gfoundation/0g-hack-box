@@ -62,15 +62,19 @@ def load_conf():
     # EVENT_TITLE and EVENT_LINE brand the screens (override in conf.d/90-local.conf).
     conf = {"SESSION_MINUTES": "30", "WARN_MINUTES": "5 1",
             "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24", "HUB_ENABLED": "0",
-            "EVENT_TITLE": "DEV DAY", "EVENT_LINE": "05 OCT . 2026 . SINGAPORE"}
+            "EVENT_TITLE": "DEV DAY", "EVENT_LINE": "05 OCT . 2026 . SINGAPORE",
+            # REWARD_TEXT: shown on the welcome and time-up screens when set.
+            # START_URL: opened next to the agent's terminal (right half) when a session starts.
+            "REWARD_TEXT": "", "START_URL": ""}
     script = ('for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done; '
               'printf "%s\\n" "$SESSION_MINUTES" "$WARN_MINUTES" "$END_GRACE_SECONDS" "$ARCHIVE_HOURS" '
-              '"$HUB_ENABLED" "$EVENT_TITLE" "$EVENT_LINE"')
+              '"$HUB_ENABLED" "$EVENT_TITLE" "$EVENT_LINE" "$REWARD_TEXT" "$START_URL"')
     try:
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              timeout=5, env={"PATH": "/usr/bin:/bin"}).stdout.split("\n")
         for key, val in zip(("SESSION_MINUTES", "WARN_MINUTES", "END_GRACE_SECONDS",
-                             "ARCHIVE_HOURS", "HUB_ENABLED", "EVENT_TITLE", "EVENT_LINE"), out):
+                             "ARCHIVE_HOURS", "HUB_ENABLED", "EVENT_TITLE", "EVENT_LINE",
+                             "REWARD_TEXT", "START_URL"), out):
             if val.strip():
                 conf[key] = val.strip()
     except (OSError, subprocess.SubprocessError):
@@ -155,15 +159,18 @@ def save_attendee(name, agent_id, email="", telegram=""):
         pass
 
 
-def open_terminal(agent=None):
-    """A terminal in ~/project, running the agent if given, else a shell."""
+def open_terminal(agent=None, url=""):
+    """A terminal in ~/project, running the agent if given, else a shell. With a URL the
+    terminal takes the left half of the screen and Firefox the right half."""
     os.makedirs(PROJECT, exist_ok=True)
     if agent:
         inner = ["bash", "-lc", AGENT_WRAPPER, "hackbox-agent", agent["command"], agent["label"]]
     else:
         inner = ["bash", "-l"]
+    side = bool(url) and shutil.which("firefox") and shutil.which("wmctrl")
     if shutil.which("gnome-terminal"):
-        argv = ["gnome-terminal", "--maximize", "--working-directory=" + PROJECT, "--"] + inner
+        argv = ["gnome-terminal", "--working-directory=" + PROJECT] + \
+               ([] if side else ["--maximize"]) + ["--"] + inner
     elif shutil.which("x-terminal-emulator"):
         argv = ["x-terminal-emulator", "-e"] + inner
     else:
@@ -172,9 +179,59 @@ def open_terminal(agent=None):
         subprocess.Popen(argv, cwd=PROJECT, start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
+        if side:
+            subprocess.Popen(["firefox", "--new-window", url], cwd=HOME, start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            threading.Thread(target=tile_side_by_side, daemon=True).start()
         return True
     except OSError:
         return False
+
+
+def tile_side_by_side():
+    """Put the terminal on the left half and Firefox on the right half, once both windows
+    exist (up to 30 s). Best effort: if anything is missing, the windows stay as opened."""
+    # Not GTK (this runs in a thread): the work area from the window manager, which also
+    # leaves out the bottom panel. "0  * DG: ...  VP: 0,0  WA: 0,0 1920x1040  Workspace 1"
+    area = None
+    for _ in range(20):
+        try:
+            d = subprocess.run(["wmctrl", "-d"], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        m = re.search(r"^\S+\s+\*.*WA: (\d+),(\d+) (\d+)x(\d+)", d, re.M)
+        if m:
+            area = [int(v) for v in m.groups()]
+            break
+        time.sleep(0.5)
+    if not area:
+        return
+    ax, ay, aw, ah = area
+    half = aw // 2
+    want = {"gnome-terminal": ax, "firefox": ax + half}
+    done = set()
+    for _ in range(60):
+        try:
+            out = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True,
+                                 timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        for line in out.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) < 3:
+                continue
+            wid, wclass = parts[0], parts[2].lower()
+            for key, x in want.items():
+                if key in wclass and key not in done:
+                    subprocess.run(["wmctrl", "-i", "-r", wid, "-b",
+                                    "remove,maximized_vert,maximized_horz"], timeout=5)
+                    subprocess.run(["wmctrl", "-i", "-r", wid, "-e",
+                                    "0,%d,%d,%d,%d" % (x, ay, half, ah)], timeout=5)
+                    done.add(key)
+        if len(done) == len(want):
+            return
+        time.sleep(0.5)
 
 
 def apply_terminal_profile():
@@ -613,6 +670,10 @@ class FullScreen(Gtk.Window):
         rules = "The clock starts when you press Start; when time is up this machine is wiped."
         if self.app.hub:
             rules += "\nYou get a QR code to download your project at the end."
+        reward = self.app.conf.get("REWARD_TEXT") if self.app.hub else ""
+        if reward:
+            box.pack_start(label("Finish your session and claim " + reward + ".", "hb-body"),
+                           False, False, 0)
         rules += "\nNever enter personal passwords, wallet seeds or private keys here."
         box.pack_start(label(rules, "hb-muted", wrap=True), False, False, 0)
         box.pack_start(label(socket.gethostname().upper(), "hb-tiny"), False, False, 4)
@@ -742,7 +803,10 @@ class FullScreen(Gtk.Window):
         if url and hub_code and self._show_qr():
             # The hub has the session: the phone page says "Preparing" until the
             # reset archived and the agent uploaded ~/project, a few seconds after Done.
-            self.code_intro.set_text("Scan to download your project (valid 7 days):")
+            reward = self.app.conf.get("REWARD_TEXT")
+            self.code_intro.set_text("Scan to download your project" +
+                                     (" and claim " + reward if reward else "") +
+                                     " (valid 7 days):")
             self.url_label.set_text(url)
             self.code_label.set_text(hub_code)
             self.code_after.set_text("Or type this code at %s/code\n"
@@ -1029,7 +1093,7 @@ class Overlay:
                 # Our button: open the chosen agent. Staff `hackbox start`:
                 # a plain terminal, so the attendee is not left guessing.
                 if self.we_started or self.last_state == "idle":
-                    open_terminal(self.pending_agent)
+                    open_terminal(self.pending_agent, self.conf.get("START_URL") or "")
                 self.we_started = False
                 self.pending_agent = None
             self.pill.update(max(0, end - int(time.time())))

@@ -69,6 +69,10 @@ the box and the session date and time.
 1. Usually the page shows Preparing for a few seconds, then Ready by itself.
 2. **Download** fetches `/d/{token}/download`: `hackbox-<code>.zip`, one folder
    `<code>-project/` with the project inside. Symlinks are left out.
+   While the time-up screen is up, the box uploads a first copy of `~/project` at once, so the
+   download is usually ready within seconds of the QR code appearing (the final copy after Done
+   replaces it). The reward card is already shown on the Preparing page during the time-up
+   screen; that page then polls instead of reloading, so a claim is never cut short.
 3. **Reward** (only when the hub has a `pay` config): under the download card, in the Ready
    and Empty states, a second card shows a floating gift box, "$10" in large type, "A gift for
    your project" and "Keep building on 0G: $10 of model credit for the wallet you use with 0G".

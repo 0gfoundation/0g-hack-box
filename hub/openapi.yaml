@@ -520,7 +520,7 @@ paths:
       description: |
         Only when the hub has a `pay` config (0G Pay partner regrant). One grant per session,
         `pay.max_per_wallet` (2) grants per wallet over all sessions, 10 calls per minute per
-        address. Allowed once the session is ready or empty (preparing answers 409, expired 410).
+        address. Allowed once the session is ready or empty, or while it is preparing if its box is on the time-up screen for this session (otherwise preparing answers 409; expired 410).
         The body carries the EVM address the attendee connected or pasted; mixed-case addresses
         must pass the EIP-55 checksum. The hub posts one row to `POST /v1/regrants` of the Pay
         API with `external_ref` = `<signer>:<ref_tag>:<session id>`, so retries are idempotent.
@@ -542,7 +542,7 @@ paths:
               schema: { $ref: '#/components/schemas/CreditReply' }
         '400': { description: 'Bad address or checksum typo.', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
         '404': { description: 'Unknown token, or credits are not enabled on this hub.' }
-        '409': { description: 'Wallet at its limit (`limit`), or the session is still preparing.', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+        '409': { description: 'Wallet at its limit (`limit`), or the session is still running (the reward opens on the time-up screen).', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
         '410': { description: 'Expired link.' }
         '429': { description: 'More than 10 tries in a minute.' }
         '502': { description: 'Pay rejected the row (`rejected`, e.g. lot_unusable) or did not answer (`error`).', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
