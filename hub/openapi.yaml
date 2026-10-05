@@ -72,6 +72,13 @@ components:
         application/json:
           schema: { type: object, additionalProperties: false, example: {} }
   schemas:
+    CreditReply:
+      type: object
+      properties:
+        outcome: { type: string, enum: [granted, already, limit, rejected, error] }
+        wallet: { type: string, description: 'Lowercase address the reply is about.' }
+        amount: { type: string, example: '$10' }
+        message: { type: string, description: 'Sentence shown to the attendee.' }
     Error:
       type: object
       properties:
@@ -505,6 +512,59 @@ paths:
         '303': { description: 'Not ready yet; back to /d/{token}.' }
         '404': { description: 'Unknown token.' }
         '410': { description: 'Expired.' }
+
+  /d/{token}/credit:
+    post:
+      tags: [public]
+      summary: Grant the session's 0G Compute credit to a wallet
+      description: |
+        Only when the hub has a `pay` config (0G Pay partner regrant). One grant per session,
+        `pay.max_per_wallet` (2) grants per wallet over all sessions, 10 calls per minute per
+        address. Allowed once the session is ready or empty (preparing answers 409, expired 410).
+        The body carries the EVM address the attendee connected or pasted; mixed-case addresses
+        must pass the EIP-55 checksum. The hub posts one row to `POST /v1/regrants` of the Pay
+        API with `external_ref` = `<signer>:<ref_tag>:<session id>`, so retries are idempotent.
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet]
+              properties:
+                wallet: { type: string, pattern: '^0x[0-9a-fA-F]{40}$', example: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }
+      responses:
+        '200':
+          description: Granted now (`granted`), or this session was credited before (`already`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreditReply' }
+        '400': { description: 'Bad address or checksum typo.', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+        '404': { description: 'Unknown token, or credits are not enabled on this hub.' }
+        '409': { description: 'Wallet at its limit (`limit`), or the session is still preparing.', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+        '410': { description: 'Expired link.' }
+        '429': { description: 'More than 10 tries in a minute.' }
+        '502': { description: 'Pay rejected the row (`rejected`, e.g. lot_unusable) or did not answer (`error`).', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+
+  /c/{code}:
+    get:
+      tags: [public]
+      summary: Short link for a session (typeable)
+      description: |
+        `/c/K7MZQ2` redirects (303) to the session's `/d/{token}` page; case, spaces and dashes in
+        the code do not matter. Unknown code: the code form with "No session with that code"
+        (404). Same limiter as POST /code: 5 tries a minute per address (429).
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string, example: K7MZQ2 }
+      responses:
+        '303': { description: 'Redirect to /d/{token}.' }
+        '400': { description: 'Not a 6 character code.', content: { text/html: {} } }
+        '404': { description: 'No live session with that code.', content: { text/html: {} } }
+        '429': { description: 'Too many tries.', content: { text/html: {} } }
 
   /code:
     get:

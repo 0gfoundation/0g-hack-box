@@ -58,6 +58,12 @@ type Server struct {
 	enrollLimiter *rateLimiter
 	boxIPs        *boxIPSet
 	gh            *githubWorker
+	// pay is the partner signer wallet (nil when credits are off); payMu serialises claims
+	// so the per-wallet cap cannot be overrun by two phones at once.
+	pay        *paySigner
+	payHTTP    *http.Client
+	payLimiter *rateLimiter
+	payMu      sync.Mutex
 }
 
 // New opens the database under DataDir and returns a ready Server.
@@ -101,6 +107,14 @@ func New(o Options) (*Server, error) {
 	s.limiter = newRateLimiter(5, time.Minute, s.now)
 	s.enrollLimiter = newRateLimiter(10, time.Minute, s.now)
 	s.boxIPs = newBoxIPSet(s.now)
+	s.payLimiter = newRateLimiter(10, time.Minute, s.now)
+	proxyKey = s.cfg.ProxyKey
+	s.payHTTP = &http.Client{Timeout: 35 * time.Second}
+	if s.cfg.Pay.enabled() {
+		s.pay, _ = newPaySigner(s.cfg.Pay.SignerKey) // validated by normalize
+		s.log.Printf("pay: compute credits on, %s per session, %d per wallet, signer %s",
+			s.cfg.Pay.amountUSD(), s.cfg.Pay.MaxPerWallet, s.pay.address)
+	}
 	s.gh = newGitHubWorker(s, o.GitHubAPI, o.GitHubPush, o.GitCmd)
 	if err := s.gh.requeueDisabled(); err != nil {
 		db.Close()
@@ -132,7 +146,9 @@ func (s *Server) Handler() http.Handler {
 	// Public pages (the only paths the tunnel should carry).
 	mux.HandleFunc("GET /d/{token}", s.pageDownload)
 	mux.HandleFunc("GET /d/{token}/download", s.pageDownloadZip)
+	mux.HandleFunc("POST /d/{token}/credit", s.pageCredit)
 	mux.HandleFunc("GET /code", s.pageCode)
+	mux.HandleFunc("GET /c/{code}", s.pageShort)
 	mux.HandleFunc("POST /code", s.pageCodePost)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -304,7 +320,15 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// proxyKey is Config.ProxyKey; set by New (one hub per process).
+var proxyKey string
+
 func clientIP(r *http.Request) string {
+	if proxyKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Hackbox-Proxy-Key")), []byte(proxyKey)) == 1 {
+		if ip := strings.TrimSpace(r.Header.Get("X-Hackbox-Client-IP")); ip != "" {
+			return ip
+		}
+	}
 	if ip := strings.TrimSpace(r.Header.Get("Cf-Connecting-IP")); ip != "" {
 		return ip
 	}

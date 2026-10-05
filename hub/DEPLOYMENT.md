@@ -72,6 +72,23 @@ monitor.
 - The deploy script writes this file only when it is missing, with a random token per box,
   and prints them once. It never overwrites it. Edit it on jarvis, then restart.
 
+- `proxy_key` (16+ random characters) lets the box.0g.ai front proxy (Cloudflare Pages
+  project `hackbox-box`, its `PROXY_KEY` secret must hold the same value) pass the real
+  visitor address in `X-Hackbox-Client-IP`; the hub uses it for the per-visitor rate limits
+  only when `X-Hackbox-Proxy-Key` matches. Empty: the proxy's own address counts.
+- `pay` turns on the 0G Compute credit on the download page (0G Pay partner regrant,
+  https://pay.0g.ai/docs/partner-regrant). All three of `api_url` (the Pay API host from the
+  partner kit), `source_lot_id` (32 hex characters, the partner's lot) and `signer_key` (hex
+  private key of the seated signer wallet) are needed; leave them empty to turn it off.
+  `amount_micros` is per grant in micro-USD (10000000 = $10), `max_per_wallet` caps how many
+  grants one wallet can collect over all sessions (2), `ref_tag` goes into the idempotency key
+  `<signer>:<ref_tag>:<session id>`, and `expires_at` (ISO 8601) shortens the credit's expiry
+  (empty inherits the lot's), `spend_url` is the button after the claim (https://pc.0g.ai) and
+  `expiry_label` the "valid until …" text shown only after the claim (empty hides it). The
+  attendee connects a wallet (or pastes an address) on `/d/{token}` after the session;
+  `POST /d/{token}/credit` grants once per session. The hub
+  logs the signer address at start; that address must be seated as the partner.
+
 ## Deploy
 
 From the laptop:

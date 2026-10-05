@@ -18,6 +18,12 @@ type Config struct {
 	EnrollToken string `json:"enroll_token"`
 	// NamePrefix is the stem of enrolled box names: <prefix>1, <prefix>2, ...
 	NamePrefix string `json:"name_prefix"`
+	// Pay grants 0G Compute credit from the download page (see pay.go). Off when empty.
+	Pay PayConfig `json:"pay"`
+	// ProxyKey: a front proxy (the box.0g.ai Pages function) that sends this value in
+	// X-Hackbox-Proxy-Key may name the real visitor in X-Hackbox-Client-IP, so the rate
+	// limits stay per visitor. Empty turns it off. 16 characters at least.
+	ProxyKey string `json:"proxy_key"`
 }
 
 // GitHubConfig names the org that receives one private repo per session.
@@ -62,6 +68,12 @@ func (c *Config) normalize() error {
 	}
 	if c.Boxes == nil {
 		c.Boxes = map[string]string{}
+	}
+	if err := c.Pay.normalize(); err != nil {
+		return err
+	}
+	if c.ProxyKey != "" && len(c.ProxyKey) < 16 {
+		return fmt.Errorf("config: proxy_key must be at least 16 characters")
 	}
 	for tok, name := range c.Boxes {
 		if len(tok) < 8 {

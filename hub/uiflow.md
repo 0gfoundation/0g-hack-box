@@ -69,6 +69,22 @@ the box and the session date and time.
 1. Usually the page shows Preparing for a few seconds, then Ready by itself.
 2. **Download** fetches `/d/{token}/download`: `hackbox-<code>.zip`, one folder
    `<code>-project/` with the project inside. Symlinks are left out.
+3. **Reward** (only when the hub has a `pay` config): under the download card, in the Ready
+   and Empty states, a second card shows a floating gift box, "$10" in large type, "A gift for
+   your project" and "Keep building on 0G: $10 of model credit for the wallet you use with 0G".
+   **Connect wallet and claim** asks the browser wallet for an account (`eth_requestAccounts`)
+   and posts it to `/d/{token}/credit`; on a phone without a wallet the attendee opens the
+   link inside the wallet app's browser, or unfolds "Paste your address" and types it
+   (mixed-case addresses must pass the EIP-55 checksum, so a typo is caught). The hub grants
+   the credit through the 0G Pay partner regrant API; on success confetti falls and the card
+   turns into "Claimed: $10 of model credit is yours, it is on 0x1234…abcd" with a
+   **Spend it on pc.0g.ai** link and "Model credit for 0G Compute, valid until 13 October
+   2026" (the link and the expiry are shown only after the claim; `spend_url`,
+   `expiry_label` in the config).
+   Rules: one credit per session (a second click says where it went), at most 2 credits per
+   wallet over all sessions ("…already received 2 credits… Use another wallet"), 10 tries per
+   minute per address. If the pool is empty or Pay rejects the row, the page says so and
+   points to the staff. After a reload the card shows "Credited" with the wallet.
 
 ### 6. Typing the code instead (`/code`)
 
@@ -78,6 +94,8 @@ the box and the session date and time.
    "No session with that code".
 4. More than 5 tries in a minute from one address shows "Too many tries" (HTTP 429). After a
    minute they can try again.
+5. Short link: `/c/K7MZQ2` (the code in the path) does the same lookup and redirects straight
+   to the download page, so a link can be read out or typed: `<host>/c/K7MZQ2`.
 
 ## Staff
 

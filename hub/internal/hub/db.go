@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS enrollments (
   current_hostname TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS credits (
+  session_id    TEXT PRIMARY KEY,
+  wallet        TEXT NOT NULL,
+  external_ref  TEXT NOT NULL UNIQUE,
+  amount_micros INTEGER NOT NULL,
+  outcome       TEXT NOT NULL,
+  detail        TEXT NOT NULL DEFAULT '',
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS credits_wallet ON credits(wallet, outcome);
+
 CREATE TABLE IF NOT EXISTS config (
   scope      TEXT NOT NULL,
   name       TEXT NOT NULL,

@@ -114,6 +114,11 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
   <button onclick="openPath('/d/'+v('dtok'))">Open /d/{token}</button>
   <button onclick="openPath('/d/'+v('dtok')+'/download')">Download zip</button>
   <button onclick="openPath('/code')">Open /code</button>
+  <button onclick="openPath('/c/'+v('scode'))">Open /c/{code}</button> <input id="scode" placeholder="6 char code" style="width:9em">
+  <div class="cols" style="margin-top:8px">
+    <div><label>Wallet for POST /d/{token}/credit (needs a pay config; 404 otherwise)</label><input id="wallet" value="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"></div>
+  </div>
+  <button onclick="call('POST','/d/'+v('dtok')+'/credit',{wallet:v('wallet')})">Grant compute credit</button>
 </fieldset>
 
 <fieldset><legend>Response</legend>

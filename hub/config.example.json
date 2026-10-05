@@ -6,5 +6,16 @@
   "github": {"org": "0g-hackbox-sessions", "token": ""},
   "download_days": 7,
   "enroll_token": "",
-  "name_prefix": "hackbox"
+  "name_prefix": "hackbox",
+  "pay": {
+    "api_url": "",
+    "source_lot_id": "",
+    "signer_key": "",
+    "amount_micros": 10000000,
+    "max_per_wallet": 2,
+    "ref_tag": "devday-sg-2026",
+    "expires_at": "",
+    "spend_url": "https://pc.0g.ai",
+    "expiry_label": "13 October 2026"
+  }
 }

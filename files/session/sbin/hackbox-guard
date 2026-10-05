@@ -5,6 +5,8 @@
 #      running (killing it is cosmetic: it comes back);
 #   2. starts a reset if the attendee's graphical session disappeared (X
 #      crashed, a logout slipped through) and LightDM's cleanup hook did not;
+#   5. (every 6 s) enables a display that was plugged in after X started, so a
+#      swapped or late-switched-on monitor gets a signal (xrandr --auto);
 #   3. restarts the timer unit if the state is active but the unit is not
 #      running (the clock cannot be paused by stopping the unit);
 #   4. retries a reset that got stuck in ending/resetting.
@@ -71,6 +73,23 @@ launch_overlay() {
   log "overlay relaunched (runuser)"
 }
 
+# 5. A monitor plugged in, switched on or swapped after X started stays dark:
+# the output is "connected" but nothing enables it in this bare session, so the
+# HDMI carries no signal. The query itself re-probes the connectors; a connected
+# output with no geometry gets `xrandr --auto`. The overlay re-lays itself out.
+fix_outputs() {
+  local display=${1:-:0} xa out
+  xa=$(x_authority)
+  out=$(timeout 5 runuser -u "$U" -- env DISPLAY="$display" XAUTHORITY="$xa" \
+        xrandr --query 2>/dev/null) || return 0
+  if printf '%s\n' "$out" | grep -Eq '^[A-Za-z0-9-]+ connected( primary)? \('; then
+    if timeout 10 runuser -u "$U" -- env DISPLAY="$display" XAUTHORITY="$xa" \
+         xrandr --auto >/dev/null 2>&1; then
+      log "enabled a newly connected display on $display"
+    fi
+  fi
+}
+
 reset_busy() {
   local s
   for s in hackbox-reset.service hackbox-home.service; do
@@ -94,6 +113,7 @@ sid_since=0
 lost_since=0
 stuck_since=0
 last_launch=0
+tick=0
 
 while :; do
   sleep 2
@@ -138,6 +158,9 @@ while :; do
       last_launch=$(now)
       launch_overlay "${display:-:0}"
     fi
+    # 5. every 6 s: light up a display that was plugged in late.
+    tick=$(( (tick + 1) % 3 ))
+    [ "$tick" -eq 0 ] && fix_outputs "${display:-:0}"
   elif [ "$seen" = 1 ] && systemctl is-active -q lightdm.service; then
     [ "$lost_since" -gt 0 ] || lost_since=$(now)
     if [ $(( $(now) - lost_since )) -ge 15 ]; then
