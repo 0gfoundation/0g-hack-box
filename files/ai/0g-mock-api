@@ -284,6 +284,7 @@ def ai_setup():
 
 
 AI_MAX_TOKENS = 4096
+AI_MIN_TOKENS = 1024
 UA = "hackbox-mock-api/1"
 
 
@@ -306,7 +307,10 @@ def relay(handler, body, simple):
     out = {k: v for k, v in body.items() if k in ("temperature", "top_p", "stop", "tools",
                                                   "tool_choice", "response_format", "stream")}
     out.update({"model": model, "messages": msgs,
-                "max_tokens": min(int(body.get("max_tokens") or 1024), AI_MAX_TOKENS)})
+                # Reasoning models think before they answer: a small cap returns an empty reply,
+                # so never below AI_MIN_TOKENS.
+                "max_tokens": max(AI_MIN_TOKENS, min(int(body.get("max_tokens") or 2048),
+                                                     AI_MAX_TOKENS))})
     stream = bool(out.get("stream")) and not simple
     if simple:
         out.pop("stream", None)
@@ -353,7 +357,7 @@ def relay(handler, body, simple):
     except (KeyError, IndexError, TypeError):
         reply = ""
     handler.send(200, {"mock": False, "source": "0G Compute", "model": data.get("model", model),
-                       "reply": reply, "usage": data.get("usage", {})}, mock=False)
+                       "reply": reply.strip(), "usage": data.get("usage", {})}, mock=False)
 
 
 class Handler(BaseHTTPRequestHandler):

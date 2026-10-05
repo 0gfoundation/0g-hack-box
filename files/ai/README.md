@@ -90,7 +90,7 @@ outside API key. `GET /` lists the endpoints. Every response carries `"mock": tr
 (streaming too, `GET /v1/models`) relay to 0G Compute with the box's router key, so an app's
 browser code gets live AI without holding the key (the service reads the key through
 `SupplementaryGroups=hacker`, as the attendee's shell can, and listens on localhost only).
-Models are limited to OG_MODEL / OG_SMALL_MODEL / OG_FALLBACK_MODEL, max_tokens to 4096.
+Models are limited to OG_MODEL / OG_SMALL_MODEL / OG_FALLBACK_MODEL, max_tokens to 1024..4096 (reasoning models need room before they answer).
 
 ## Faster builds
 
