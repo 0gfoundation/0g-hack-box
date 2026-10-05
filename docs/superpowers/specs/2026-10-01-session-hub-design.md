@@ -198,3 +198,23 @@ encrypting archives at rest.
   `/opt/0g-agent-skills`, root owned, world readable. Every fresh home gets
   `~/.claude/CLAUDE.md` and `~/.config/opencode/AGENTS.md` that point at it. `hackbox skills
   update` refreshes the clone.
+
+## Round 4 (prototype 2026-10-05, branch faucet-fund): testnet 0G from inside the session
+
+- The attendee's agent needs gas to deploy on Galileo. `0g-fund <address>` on the box posts the
+  address to `POST /d/{token}/fund` (the session link in `/run/hackbox/hub-url`, public host:
+  the attendee uid cannot reach the tailnet). The hub calls the 0G faucet's service-account
+  API (`POST /v1/transfers`, Bearer `fsk_...`); the key stays on the hub. `GET /d/{token}/fund`
+  follows the transfers (refreshed from `GET /v1/transfers/{id}`).
+- Only while the session runs: not ended, and the box's last heartbeat (30 s) says `active`
+  with this session.
+- Idempotency: `request_id` = `user_id` = `<ref_tag>:<session>:<wallet>`, a `:<n>` suffix only
+  after a failed transfer. The same call again reports the transfer, never sends twice.
+- Caps (config `faucet`, in 0G): per session 1, per wallet over all sessions 1, per box per
+  60 minutes 2, per event 50 (since `event_since`), 30 POSTs a minute per client address
+  (loose: one venue shares an address). Queued, executing, completed and unknown transfers
+  count; failed and refused ones do not. One mutex makes check and spend atomic.
+- The faucet sends a fixed 0.5 0G drip and allows one per wallet per 24 h (shared with the
+  public faucet), so 1 0G on one wallet needs an api_only promo code (`faucet.promo_code`,
+  scope `promo:mint`), which sends the code's amount without the 24 h limit.
+- `files/ai/50-ai-seed` adds one line to both agents' 0G pointer when `0g-fund` is installed.

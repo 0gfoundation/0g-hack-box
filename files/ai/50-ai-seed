@@ -7,7 +7,8 @@
 #   ~/.config/opencode/      OpenCode needs no config here (it is managed), only AGENTS.md:
 #   ~/.claude/CLAUDE.md and ~/.config/opencode/AGENTS.md
 #                            point both agents at the 0G agent skills in /opt/0g-agent-skills
-#                            (when present), so they know the 0G stack from the first prompt
+#                            (when present), so they know the 0G stack from the first prompt,
+#                            and at `0g-fund` for testnet 0G (when installed)
 #   ~/.config/hackbox/env    when opencode or claude-0g is offered: ZG_ROUTER_API_KEY,
 #                            OG_ROUTER_URL and OG_MODEL for the attendee's own code (the
 #                            starter kit's compute example reads them), sourced by a guarded
@@ -75,23 +76,35 @@ PY
 mkdir -p "$home/.config/opencode" "$home/.config/hackbox"
 
 # 0G agent skills: one global instruction for each agent (the build.0g.ai installer's line,
-# with the shared copy instead of a per-project clone).
+# with the shared copy instead of a per-project clone), plus the testnet 0G line when the
+# 0g-fund helper is installed.
 skills=/opt/0g-agent-skills
-if [ -r "$skills/CLAUDE.md" ]; then
-  for pair in "CLAUDE.md:$home/.claude/CLAUDE.md" "AGENTS.md:$home/.config/opencode/AGENTS.md"; do
-    src=${pair%%:*} dst=${pair#*:}
-    cat > "$dst" <<EOF
-# Building on 0G
+fund=${HB_FUND_CMD:-/usr/local/bin/0g-fund}
+fundline=""
+if [ -x "$fund" ]; then
+  fundline='Testnet 0G for gas (Galileo): run `0g-fund <wallet address>` to fund a wallet, for example one you just created to deploy contracts. It sends testnet 0G from the event faucet during this session (up to 1 0G per session), waits and prints the tx hash. Do not ask the user to visit a faucet website. `0g-fund --status` shows what this session already got.'
+fi
+[ -r "$skills/CLAUDE.md" ] || log "no 0G agent skills in $skills (run: hackbox skills update)"
+for pair in "CLAUDE.md:$home/.claude/CLAUDE.md" "AGENTS.md:$home/.config/opencode/AGENTS.md"; do
+  src=${pair%%:*} dst=${pair#*:}
+  [ -r "$skills/CLAUDE.md" ] || [ -n "$fundline" ] || continue
+  {
+    echo "# Building on 0G"
+    if [ -r "$skills/CLAUDE.md" ]; then
+      cat <<EOF
 
 This machine is for building on 0G. For anything 0G (storage, compute, chain, Agentic ID,
 private computer), read and follow $skills/$src first. The skills are in
 $skills/skills/, the deeper patterns in $skills/patterns/ and working examples in
 $skills/examples/. Use them before guessing package names, versions or APIs.
 EOF
-  done
-else
-  log "no 0G agent skills in $skills (run: hackbox skills update)"
-fi
+    fi
+    if [ -n "$fundline" ]; then
+      echo
+      echo "$fundline"
+    fi
+  } > "$dst"
+done
 
 # Router environment for the attendee's own code (A2).
 envf="$home/.config/hackbox/env"

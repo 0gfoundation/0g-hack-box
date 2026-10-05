@@ -38,6 +38,10 @@ func main() {
 	if err != nil {
 		logger.Fatalf("config: %v", err)
 	}
+	// The faucet key may come from the environment instead of the config file.
+	if k := os.Getenv("FAUCET_API_KEY"); k != "" && cfg.Faucet.APIKey == "" {
+		cfg.Faucet.APIKey = k
+	}
 	if err := os.MkdirAll(*data, 0o700); err != nil {
 		logger.Fatalf("data dir: %v", err)
 	}

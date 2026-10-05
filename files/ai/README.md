@@ -67,3 +67,12 @@ private address also needs `NFT_ALLOW4="10.0.2.2"` in `39-lockdown-local.conf`.
     sudo -iu hacker bash -lc 'cd ~/project && opencode run "say ok"'
 
 The admin account cannot read the key files (group `hacker` only), so test as `hacker`.
+
+## Testnet 0G for the attendee's wallets (`0g-fund`)
+
+`/usr/local/bin/0g-fund <address>` asks the session hub to send testnet 0G (Galileo) to a
+wallet, waits and prints the tx hash; `0g-fund --status` lists what the session got. It reads
+the session link from `/run/hackbox/hub-url` and goes through the hub's public host, which
+holds the faucet key and the caps (1 0G per session by default); the box holds no key. The
+fresh home's `AGENTS.md` / `CLAUDE.md` tell both agents to use it instead of a faucet website.
+Without a `faucet` block in the hub config the hub answers 404 and `0g-fund` says so.

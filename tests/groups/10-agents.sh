@@ -42,6 +42,14 @@ group_agents() {
     fail "agents_reject_claude_conflict" "set claude+claude-0g rc=$rc, set went '$before' to '$after'"
   fi
 
+  # 0g-fund (testnet 0G through the session hub) runs for the attendee, and both agents'
+  # 0G pointers tell them to use it instead of sending the user to a faucet.
+  if as_hacker_t 10 '0g-fund --help >/dev/null && grep -q "0g-fund <wallet address>" "$HOME/.config/opencode/AGENTS.md" && grep -q "0g-fund <wallet address>" "$HOME/.claude/CLAUDE.md"'; then
+    pass "agents_fund_pointer"
+  else
+    fail "agents_fund_pointer" "0g-fund missing, or not named in AGENTS.md / CLAUDE.md of the fresh home"
+  fi
+
   # onboarding pre-seeded in the current (fresh) home.
   if as_hacker_t 15 'test -f "$HOME/.claude.json"' ; then
     cj="$(as_hacker_t 15 'cat "$HOME/.claude.json"')"

@@ -79,6 +79,36 @@ components:
         wallet: { type: string, description: 'Lowercase address the reply is about.' }
         amount: { type: string, example: '$10' }
         message: { type: string, description: 'Sentence shown to the attendee.' }
+    FundReply:
+      type: object
+      properties:
+        outcome:
+          type: string
+          enum: [queued, executing, completed, already, failed, refused, unknown, limit, inactive, error]
+          description: |
+            queued / executing: on its way. completed / already: the wallet has it. failed: the
+            faucet could not send (call again to retry). refused: the faucet said no, e.g. the
+            wallet had a drip in the last 24 h. unknown: the faucet did not answer (call again;
+            it never sends twice). limit: a hub cap is reached. inactive: the session is not
+            running. error: bad request, unknown link or rate limit.
+        wallet: { type: string, description: 'Lowercase address the reply is about.' }
+        amount: { type: string, example: '0.5', description: 'Testnet 0G of this transfer.' }
+        status: { type: string, enum: [queued, executing, completed, failed], description: 'The faucet transfer status, when there is one.' }
+        tx_hash: { type: string, example: '0x5f3c...' }
+        explorer_url: { type: string, example: 'https://chainscan-galileo.0g.ai/tx/0x5f3c...' }
+        session_remaining: { type: string, example: '0.5', description: '0G this session can still send.' }
+        message: { type: string, description: 'One sentence for the attendee or their AI agent: what happened and what to do next.' }
+    FundList:
+      type: object
+      properties:
+        active: { type: boolean, description: 'The box reports this session as running now.' }
+        amount: { type: string, example: '0.5', description: '0G per transfer.' }
+        session_max: { type: string, example: '1' }
+        session_remaining: { type: string, example: '0.5' }
+        transfers:
+          type: array
+          description: Newest first.
+          items: { $ref: '#/components/schemas/FundReply' }
     Error:
       type: object
       properties:
@@ -546,6 +576,65 @@ paths:
         '410': { description: 'Expired link.' }
         '429': { description: 'More than 10 tries in a minute.' }
         '502': { description: 'Pay rejected the row (`rejected`, e.g. lot_unusable) or did not answer (`error`).', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+
+  /d/{token}/fund:
+    post:
+      tags: [public]
+      summary: Send testnet 0G to a wallet during the session (the 0g-fund CLI)
+      description: |
+        Only when the hub has a `faucet` config (an API key for the 0G faucet's service-account
+        API, POST /v1/transfers). The faucet key stays on the hub; a box only knows its session
+        link (`/run/hackbox/hub-url`), so the attendee's agent calls this through the public host.
+
+        Works only while the session is running: the session has not ended and the box's last
+        heartbeat (within 30 s) reports it `active`. One transfer per session and wallet; the
+        same call again returns that transfer instead of sending twice. Caps (config, in 0G):
+        `session_max_og` (1) per session over its wallets, `wallet_max_og` (1) per wallet over all
+        sessions, `box_hourly_max_og` (2) per box in any 60 minutes, `event_budget_og` (50) in
+        all since `event_since`. Queued, executing, completed and unknown transfers count;
+        failed and refused ones do not. `ip_per_minute` (30) calls per minute per client address
+        (box.0g.ai passes the visitor's address with the proxy key; the boxes of one venue share
+        it, so this is loose on purpose).
+
+        Faucet request: `request_id` = `user_id` = `<ref_tag>:<session id>:<wallet>` (plus `:<n>`
+        after a failed attempt), `promo_code` when configured, `reason` and `metadata` {source,
+        box, session}. With the fixed drip the faucet sends 0.5 0G and allows one drip per
+        wallet per 24 h, shared with the public faucet (then `refused`, 429).
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet]
+              properties:
+                wallet: { type: string, pattern: '^0x[0-9a-fA-F]{40}$', example: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }
+      responses:
+        '200': { description: 'This session and wallet were funded before (`already`, `queued`, `executing`), or the faucet returned an existing transfer.', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '202': { description: 'Queued at the faucet (`queued`). Follow it with GET.', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '400': { description: 'Bad address or checksum typo, or the faucet refused the body.', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '403': { description: 'The session is not running (`inactive`).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '404': { description: 'Unknown token, or funding is not enabled on this hub.' }
+        '409': { description: 'A hub cap is reached (`limit`), or the faucet refused (promo exhausted or its per-wallet limit).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '429': { description: 'Too many calls from this address, or the faucet funded this wallet in the last 24 h (`refused`, with the time it can get more).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '502': { description: 'The faucet did not answer (`unknown`), the transfer failed (`failed`), or the hub key is not accepted (`refused`).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+    get:
+      tags: [public]
+      summary: This session's transfers and what it can still send
+      description: |
+        Transfers still on their way are refreshed from the faucet (GET /v1/transfers/{id}, at
+        most every 2 s each). Works after the session too, until the link expires. `?wallet=`
+        limits the list to one address. 10 times `ip_per_minute` calls per minute per address.
+      parameters:
+        - { $ref: '#/components/parameters/DownloadToken' }
+        - { name: wallet, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: 'The list.', content: { application/json: { schema: { $ref: '#/components/schemas/FundList' } } } }
+        '400': { description: 'Bad wallet in the query.' }
+        '404': { description: 'Unknown token, or funding is not enabled on this hub.' }
+        '410': { description: 'Expired link.' }
+        '429': { description: 'Too many calls.' }
 
   /c/{code}:
     get:

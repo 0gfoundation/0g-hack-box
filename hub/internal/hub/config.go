@@ -20,6 +20,9 @@ type Config struct {
 	NamePrefix string `json:"name_prefix"`
 	// Pay grants 0G Compute credit from the download page (see pay.go). Off when empty.
 	Pay PayConfig `json:"pay"`
+	// Faucet funds attendee wallets with testnet 0G during a session (see faucet.go). Off
+	// without an api_key.
+	Faucet FaucetConfig `json:"faucet"`
 	// ProxyKey: a front proxy (the box.0g.ai Pages function) that sends this value in
 	// X-Hackbox-Proxy-Key may name the real visitor in X-Hackbox-Client-IP, so the rate
 	// limits stay per visitor. Empty turns it off. 16 characters at least.
@@ -70,6 +73,9 @@ func (c *Config) normalize() error {
 		c.Boxes = map[string]string{}
 	}
 	if err := c.Pay.normalize(); err != nil {
+		return err
+	}
+	if err := c.Faucet.normalize(); err != nil {
 		return err
 	}
 	if c.ProxyKey != "" && len(c.ProxyKey) < 16 {

@@ -88,6 +88,19 @@ monitor.
   attendee connects a wallet (or pastes an address) on `/d/{token}` after the session;
   `POST /d/{token}/credit` grants once per session. The hub
   logs the signer address at start; that address must be seated as the partner.
+- `faucet` lets the attendee's agent fund a wallet with testnet 0G during the session
+  (`POST /d/{token}/fund`, the box's `0g-fund <address>`), through the 0G faucet's
+  service-account API. `api_key` (`fsk_...`, scopes `transfers:write` and `transfers:read`)
+  turns it on; it may also come from the `FAUCET_API_KEY` environment variable of the hub
+  process, and never goes to a box. `api_url` defaults to
+  `https://faucet-api.udhaykumarbala.dev`. Caps in 0G: `session_max_og` (1), `wallet_max_og`
+  (1, over all sessions), `box_hourly_max_og` (2), `event_budget_og` (50, counted from
+  `event_since`, RFC 3339, empty means all time); `ip_per_minute` (30). `amount_og` (0.5) is
+  what one transfer sends: the faucet's fixed drip. `promo_code`, when set, is an api_only
+  code this key minted (needs scope `promo:mint`), redeemed on every transfer so the faucet
+  sends the code's amount (set `amount_og` to match, e.g. 1) without its 24 h wallet limit.
+  `ref_tag` (hackbox) starts the idempotency key `<ref_tag>:<session>:<wallet>`.
+  `explorer_tx_url` defaults to `https://chainscan-galileo.0g.ai/tx/`.
 
 ## Deploy
 

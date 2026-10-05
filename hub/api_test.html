@@ -119,6 +119,12 @@ The hub serves this page at <code>/dash/api_test.html</code>, so calls are same-
     <div><label>Wallet for POST /d/{token}/credit (needs a pay config; 404 otherwise)</label><input id="wallet" value="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"></div>
   </div>
   <button onclick="call('POST','/d/'+v('dtok')+'/credit',{wallet:v('wallet')})">Grant compute credit</button>
+  <div class="cols" style="margin-top:8px">
+    <div><label>Wallet for /d/{token}/fund (needs a faucet config and an active session; sends real testnet 0G)</label><input id="fwallet" value="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"></div>
+  </div>
+  <button onclick="if(confirm('Ask the faucet to send testnet 0G to '+v('fwallet')+'?'))call('POST','/d/'+v('dtok')+'/fund',{wallet:v('fwallet')})">Fund wallet (POST)</button>
+  <button onclick="call('GET','/d/'+v('dtok')+'/fund')">Fund status (GET)</button>
+  <button onclick="call('GET','/d/'+v('dtok')+'/fund?wallet='+enc(v('fwallet')))">Fund status for this wallet</button>
 </fieldset>
 
 <fieldset><legend>Response</legend>

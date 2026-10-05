@@ -91,6 +91,24 @@ CREATE TABLE IF NOT EXISTS credits (
 );
 CREATE INDEX IF NOT EXISTS credits_wallet ON credits(wallet, outcome);
 
+CREATE TABLE IF NOT EXISTS fundings (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id   TEXT NOT NULL,
+  box          TEXT NOT NULL,
+  wallet       TEXT NOT NULL,
+  request_id   TEXT NOT NULL UNIQUE,
+  transfer_id  TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL,
+  amount_milli INTEGER NOT NULL,
+  tx_hash      TEXT NOT NULL DEFAULT '',
+  detail       TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS fundings_session ON fundings(session_id);
+CREATE INDEX IF NOT EXISTS fundings_wallet ON fundings(wallet, status);
+CREATE INDEX IF NOT EXISTS fundings_box ON fundings(box, created_at);
+
 CREATE TABLE IF NOT EXISTS config (
   scope      TEXT NOT NULL,
   name       TEXT NOT NULL,
