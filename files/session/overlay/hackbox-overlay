@@ -900,6 +900,10 @@ class FullScreen(Gtk.Window):
         else:
             buttons.pack_start(self._start_button("Start my session", "", None), True, True, 0)
         card.pack_start(buttons, False, False, 6)
+        # Why Start is still grey, once something is typed (a missing @ is the usual one).
+        self.form_hint = label("", "hb-error", wrap=True)
+        self.form_hint.set_no_show_all(True)
+        card.pack_start(self.form_hint, False, False, 0)
         self.welcome_error = label("", "hb-error", wrap=True)
         self.welcome_error.set_no_show_all(True)
         card.pack_start(self.welcome_error, False, False, 0)
@@ -957,6 +961,20 @@ class FullScreen(Gtk.Window):
             ok = False                          # optional, but if typed it must be valid
         for b in self.start_buttons:
             b.set_sensitive(ok and not self.busy and getattr(b, "hb_ready", True))
+        hint = getattr(self, "form_hint", None)
+        if hint is not None and self.name_entry is not None:
+            name, email = self.attendee_name(), self.attendee_email()
+            msg = ""
+            if name and len(name) < 2:
+                msg = "Name: at least 2 characters."
+            elif email and "@" not in email:
+                msg = "Email needs an @ (Shift + 2), like name@example.com."
+            elif email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                msg = "Email looks incomplete, like name@example.com."
+            elif tg and not re.fullmatch(r"[A-Za-z0-9_]{5,32}", tg):
+                msg = "Telegram: 5 to 32 letters, digits or _ (or leave it empty)."
+            hint.set_text(msg)
+            hint.set_visible(bool(msg))
 
     def _start_button(self, text, note, agent):
         btn = Gtk.Button()
