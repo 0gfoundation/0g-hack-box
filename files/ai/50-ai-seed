@@ -109,11 +109,14 @@ EOF
 
 - Plan first: write a 3 to 6 line plan, then build. Ship the smallest version that demos
   end to end, then improve it. Keep replies short.
-- Work in parallel: when parts are independent (contract, frontend, scripts), launch
-  subagents with the task tool, several in ONE message so they run at the same time. Use the
-  \`contract\` subagent for Solidity and deploys and the \`frontend\` subagent for the web UI.
-  Give each a complete brief (file paths, ABI or API shape, ports) because they do not see
-  this conversation.
+- Work in parallel, always: in your FIRST step launch 3 to 5 subagents with the task tool,
+  all in ONE message so they run at the same time. Use \`contract\` (Solidity, fund, deploy),
+  \`frontend\` (the web UI), \`designer\` (polish once a first screen exists), \`reviewer\`
+  (run it, find and fix bugs, once it runs) and \`pitch\` (README.md and a 60 second
+  DEMO.md). Give each a complete brief (file paths, ABI or API shape, ports) because they
+  do not see this conversation. Launch another round as soon as one finishes.
+- Show progress early: start the dev server and give the user the URL as soon as the first
+  screen works, then keep improving it.
 - Keep context small: search with rg and read only the parts you need. Never read
   node_modules, lock files, build output or large logs.
 - Start from the examples in $skills/examples/ when one fits instead of from scratch.
@@ -125,6 +128,16 @@ the project's .env (and .env in .gitignore), fund it with \`0g-fund <address>\`,
 0G Galileo testnet (chain details in $skills/), and show the explorer link to the contract.
 Write the deployed address and ABI where the frontend reads them.
 
+## Every app gets live AI (real 0G Compute)
+
+Give every app at least one AI feature that runs on 0G Compute: an assistant, an analyst,
+a writer, a generator, an agent chat. From browser code call the box's relay, which holds
+the key for you: POST http://127.0.0.1:4010/ai/chat with {"prompt": "...", "system": "..."}
+(answer in .reply), or the OpenAI compatible http://127.0.0.1:4010/v1/chat/completions
+(baseURL http://127.0.0.1:4010/v1, any apiKey, "stream": true for streaming). Stream long
+answers. Label these features "Powered by 0G Compute". Server code can also use
+ZG_ROUTER_API_KEY and OG_ROUTER_URL from the environment.
+
 ## External APIs: use the local mock API
 
 Prices, candles, order books, trading pairs, an AI model or agent marketplace, NFT and data
@@ -134,8 +147,8 @@ lists every endpoint, for example /prices?symbols=BTC,ETH,0G, /candles?symbol=ET
 /orderbook, /markets, /ai/models, /ai/agents, /marketplace/listings, /news,
 /portfolio?address=0x...). Prices move while you poll, so charts look live. It is fake data:
 always show a visible "Mock data" badge in the UI where it is used and tell the user it is
-mock data. Real AI calls still go to 0G Compute (ZG_ROUTER_API_KEY and OG_ROUTER_URL are in
-the environment) and real contracts to the 0G chain; mock only what has no real source here.
+mock data. AI is real (above) and contracts are real on the 0G chain; mock only what has no
+real source here.
 EOF
   } > "$dst"
 done

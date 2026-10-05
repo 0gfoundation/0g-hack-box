@@ -8,8 +8,9 @@
 #   /usr/local/lib/hackbox/ai/key         Claude Code apiKeyHelper
 #   /usr/local/bin/hackbox-agent          the manifest's launch command
 #   /usr/local/bin/0g-fund                testnet 0G for a wallet, through the session hub
-#   /usr/local/bin/0g-mock-api            mock prices / markets / AI marketplace API, run by
-#                                         hackbox-mock-api.service on 127.0.0.1:4010
+#   /usr/local/bin/0g-mock-api            mock prices / markets / AI marketplace API plus a live
+#                                         0G Compute AI relay, hackbox-mock-api.service on :4010
+#   /etc/hackbox/ai/starters.json         welcome-screen idea starters (OpenCode first prompts)
 #   /etc/hackbox/reset.d/50-ai-seed       seeds agent state into every fresh home
 #   /opt/0g-agent-skills                  the 0G agent skills, which every fresh home's
 #                                         ~/.claude/CLAUDE.md and opencode AGENTS.md point at
@@ -53,6 +54,7 @@ sudo install -m 0755 "$A/key" /usr/local/lib/hackbox/ai/key
 sudo install -m 0755 "$A/hackbox-agent" /usr/local/bin/hackbox-agent
 sudo install -m 0755 "$A/0g-fund" /usr/local/bin/0g-fund
 sudo install -m 0755 "$A/0g-mock-api" /usr/local/bin/0g-mock-api
+sudo install -m 0644 "$A/starters.json" /etc/hackbox/ai/starters.json
 sudo install -m 0644 "$A/hackbox-mock-api.service" /etc/systemd/system/hackbox-mock-api.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now hackbox-mock-api.service

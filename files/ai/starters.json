@@ -1,0 +1,31 @@
+{
+  "_comment": "Idea starters on the welcome screen. id: saved by the overlay; label: the chip; brief: sent to OpenCode as its first prompt (empty: OpenCode starts blank). hackbox-agent adds the shared 'how to build here' tail. Installed to /etc/hackbox/ai/starters.json.",
+  "tail": "How to build it here: first write a 5 line plan, then in ONE message launch these subagents in parallel with complete briefs (paths, ports, contract interface, API shapes): contract (write, fund the deployer with 0g-fund, deploy to 0G Galileo, write address and ABI to frontend/src/contract.json), frontend (Vite + React app in ./frontend on port 5173, polished dark UI with the 0G purple palette), designer (after the first UI exists: polish layout, animations, loading and empty states), and when the app runs, reviewer (open it, click through every flow, fix every bug) and pitch (README.md and a 60 second demo script in DEMO.md). Outside data comes from the local mock API at http://127.0.0.1:4010 (GET / lists it) with a visible Mock data badge. The AI features are REAL 0G Compute: from the browser call POST http://127.0.0.1:4010/ai/chat with {prompt, system} (reply in .reply) or the OpenAI-compatible http://127.0.0.1:4010/v1/chat/completions with stream: true; label them Powered by 0G Compute. Start the dev server and tell me the URL to open in Firefox as soon as the first screen works, then keep improving it.",
+  "starters": [
+    {
+      "id": "ai-marketplace",
+      "label": "AI market",
+      "brief": "Build an AI agent marketplace dapp on 0G. A home page lists AI models and agents as rich cards (from /ai/models and /ai/agents: name, creator, rating, price per call in 0G, runs, tags) with search, category filters and sorting. Each agent has a detail page with a live Try it chat that answers in that agent's persona using real 0G Compute, streaming the reply. Creators can list a new agent through a form; an AI button writes the agent's description and tagline for them. Contract AgentMarket: listAgent(name, metadataURI, pricePerCall) and payable callAgent(agentId) that pays the creator and emits AgentCalled; the UI shows the on-chain listings next to the mock ones and a Pay and run button that sends the testnet 0G transaction with the user's wallet (MetaMask on 0G Galileo) before the chat answers."
+    },
+    {
+      "id": "trading",
+      "label": "Trading",
+      "brief": "Build an AI trading dashboard on 0G. A pro trading layout: a watchlist of pairs with live prices and 24h change (/markets, /prices, polling every 2 s), a big candlestick chart with interval switcher (/candles, use lightweight-charts), an order book and recent trades panel (/orderbook, /trades), and a portfolio card (/portfolio). An AI copilot side panel uses real 0G Compute: it reads the current candles, order book and news (/news) and streams a market analysis, a sentiment score and a suggested trade with reasoning; a one click Explain this chart button too. Contract TradeJournal: users record paper trades on-chain (pair, side, size, price, the AI's reason) and the dashboard shows their on-chain journal with live profit and loss against the mock prices."
+    },
+    {
+      "id": "ai-agent",
+      "label": "AI agent",
+      "brief": "Build an on-chain AI agent studio on 0G. Users create an agent with a name, avatar emoji, personality and goals; it is minted as an NFT (contract AgentNFT, ERC-721 with the persona in on-chain metadata). Each agent gets a full screen chat that streams answers from real 0G Compute in its persona, with tools it can use: live prices (/prices), news (/news) and the user's portfolio (/portfolio), shown as tool cards in the chat. After each conversation the agent writes a one line memory; the app stores the memory hashes on-chain (AgentNFT.addMemory) and shows the agent's memory timeline. A gallery page shows all minted agents with a Chat button."
+    },
+    {
+      "id": "nft-drop",
+      "label": "NFT drop",
+      "brief": "Build an AI generated NFT drop on 0G. The user types a theme; real 0G Compute generates a collection: names, descriptions, rarity traits and the artwork itself as SVG code (ask the model for a self-contained 512x512 SVG), previewed live as cards with a shimmer while generating. A mint page mints the chosen piece with contract AINFTDrop (ERC-721, fully on-chain SVG in tokenURI as base64 JSON, max supply, mint price in testnet 0G). Show a collection gallery with the minted items and a marketplace strip from /marketplace/listings (mock). Add an AI critic button that rates and roasts a piece."
+    },
+    {
+      "id": "own",
+      "label": "My own idea",
+      "brief": ""
+    }
+  ]
+}

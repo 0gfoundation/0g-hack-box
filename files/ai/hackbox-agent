@@ -55,4 +55,23 @@ if [ -z "$exe" ]; then
   say "$bin is not installed on this station. Please ask a staff member."
   exit 4
 fi
+
+# Idea starter: the welcome screen saves the chosen idea; OpenCode gets its brief (plus the
+# shared build tail) as the first prompt. Used once: the file goes, so a relaunch starts plain.
+starter_file=$HOME/.cache/hackbox/starter
+if [ "$id" = opencode ] && [ $# -eq 0 ] && [ -f "$starter_file" ] && [ -r /etc/hackbox/ai/starters.json ]; then
+  starter=$(head -c 40 "$starter_file" | tr -cd 'a-z0-9-')
+  rm -f "$starter_file"
+  brief=$(python3 - "$starter" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open("/etc/hackbox/ai/starters.json"))
+s = next((s for s in d.get("starters", []) if s.get("id") == sys.argv[1]), None)
+if s and s.get("brief"):
+    print(s["brief"] + "\n\n" + d.get("tail", ""))
+PY
+)
+  if [ -n "$brief" ]; then
+    exec "$exe" --prompt "$brief"
+  fi
+fi
 exec "$exe" "$@"

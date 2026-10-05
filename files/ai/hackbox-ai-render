@@ -339,7 +339,44 @@ def opencode_config():
                           "clean and good looking. Read the contract address and ABI from the paths "
                           "you are given. For outside data (prices, markets, AI or NFT marketplace, "
                           "news) use the mock API at http://127.0.0.1:4010 and show a visible "
-                          "\"Mock data\" badge where it is used. Reply with the URL to open, briefly.",
+                          "\"Mock data\" badge where it is used. AI features call real 0G Compute "
+                          "through http://127.0.0.1:4010/ai/chat or /v1/chat/completions (stream). "
+                          "Reply with the URL to open, briefly.",
+            },
+            "designer": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Polishes an existing web UI: layout, typography, colour, motion, "
+                               "loading, empty and error states, responsive design. Use once a "
+                               "first screen exists.",
+                "prompt": "You make an existing web app look and feel great without breaking it. "
+                          "Dark theme with the 0G purple palette unless the app has its own. Improve "
+                          "spacing, hierarchy and typography, add tasteful motion and hover states, "
+                          "skeleton loaders, empty and error states, and make it responsive. Keep "
+                          "every feature working; run the build to check. Reply with what changed, "
+                          "briefly.",
+            },
+            "reviewer": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Runs the app, exercises every flow (build, dev server, API calls, "
+                               "contract calls), and fixes the bugs it finds. Use when the app runs.",
+                "prompt": "You are the QA engineer. Build and run the app, fetch its pages and APIs "
+                          "with curl, read the browser console errors from the dev server output, "
+                          "run the contract tests, and click through each flow in your head against "
+                          "the code. Fix every bug you find directly, rerun to confirm. Reply with "
+                          "the bugs fixed and anything still open, briefly.",
+            },
+            "pitch": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Writes README.md (what, why, how it uses 0G, how to run, contract "
+                               "address and explorer link) and DEMO.md, a 60 second demo script.",
+                "prompt": "You write the project's story for judges. README.md: one line pitch, the "
+                          "problem, what it does, how it uses 0G (chain, compute, storage), "
+                          "architecture, how to run, the deployed contract address with explorer "
+                          "link, and what is mock data. DEMO.md: a 60 second demo script, click by "
+                          "click, with what to say. Read the code to get facts right. Reply briefly.",
             },
         },
     }

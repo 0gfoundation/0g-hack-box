@@ -41,6 +41,7 @@ from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
 RUN = "/run/hackbox"
 ASSETS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets")
 AGENTS_FILE = "/etc/hackbox/agents.json"
+STARTERS_FILE = "/etc/hackbox/ai/starters.json"
 HOME = os.path.expanduser("~")
 PROJECT = os.path.join(HOME, "project")
 TERMINAL_PROFILE = os.path.join(HOME, ".config", "hackbox", "gnome-terminal.dconf")
@@ -141,6 +142,27 @@ def start_unit(unit, done):
             ok, msg = False, str(e)
         GLib.idle_add(done, ok, msg)
     threading.Thread(target=work, daemon=True).start()
+
+
+def load_starters():
+    """Idea starters for the welcome card (id and label), or [] without the file."""
+    try:
+        with open(STARTERS_FILE, encoding="utf-8") as fh:
+            items = json.load(fh).get("starters") or []
+        return [s for s in items if s.get("id") and s.get("label")][:6]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def save_starter(starter_id):
+    """The chosen idea, for hackbox-agent to turn into OpenCode's first prompt."""
+    path = os.path.join(HOME, ".cache", "hackbox", "starter")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(starter_id[:40] + "\n")
+    except OSError:
+        pass
 
 
 def save_attendee(name, agent_id, email="", telegram=""):
@@ -290,6 +312,13 @@ CSS_TEMPLATE = """
 .hb-start .hb-note { color: #6a55c8; }
 .hb-start:disabled .hb-note { color: rgba(255,255,255,0.5); }
 .hb-error  { font-size: {small}px; color: #ffd0e6; }
+.hb-chip   { font-size: {chip}px; font-weight: 600; padding: {chip_v}px {chip_h}px; border-radius: 999px;
+             background-image: none; background-color: rgba(255,255,255,0.10); color: #ffffff;
+             border: 1px solid rgba(255,255,255,0.30); box-shadow: none; }
+.hb-chip label { color: #ffffff; }
+.hb-chip:hover { background-color: rgba(255,255,255,0.18); }
+.hb-chip:checked { background-color: #ffffff; border-color: #ffffff; }
+.hb-chip:checked label { color: #2a1d6e; }
 .hb-code   { font-size: {code}px; font-weight: 700; font-family: "Ubuntu Mono", monospace;
              letter-spacing: 10px; color: #ffffff; }
 .hb-url    { font-size: {small}px; font-family: "Ubuntu Mono", monospace; color: rgba(255,255,255,0.8); }
@@ -330,7 +359,8 @@ def install_css(provider):
     f = scale_factor()
     sizes = {"event": 70, "line": 22, "title": 34, "body": 21, "small": 16, "tiny": 12,
              "code": 64, "button": 21, "bpad_v": 13, "bpad_h": 30, "pill": 22, "pillbtn": 15,
-             "toast": 30, "cardpad": 28, "fpad_v": 10, "fpad_h": 16, "qrpad": 14}
+             "toast": 30, "cardpad": 28, "fpad_v": 10, "fpad_h": 16, "qrpad": 14,
+             "chip": 15, "chip_v": 6, "chip_h": 12}
     css = CSS_TEMPLATE
     for key, px in sizes.items():
         css = css.replace("{" + key + "}", str(int(round(px * f))))
@@ -805,7 +835,9 @@ class FullScreen(Gtk.Window):
         conf = self.app.conf
         box = self._column()
         box.set_spacing(int(16 * scale_factor()))
-        box.pack_start(lockup(conf), False, False, 0)
+        self.starters = load_starters() if any(a["id"] == "opencode" for a in self.app.agents) else []
+        # The idea chips need the room: a slightly smaller lockup then.
+        box.pack_start(lockup(conf, scale=0.8 if self.starters else 1.0), False, False, 0)
         box.pack_start(label("Build on 0G & Earn 0G", "hb-title"), False, False, 0)
         art = self._side_art()
 
@@ -825,6 +857,36 @@ class FullScreen(Gtk.Window):
             card.pack_start(field("NAME", self.name_entry), False, False, 0)
             card.pack_start(field("EMAIL", self.email_entry), False, False, 0)
             card.pack_start(field("TELEGRAM  (OPTIONAL)", self.telegram_entry), False, False, 0)
+
+        # Idea starters: the chosen one becomes OpenCode's first prompt (hackbox-agent).
+        self.starter_id = ""
+        if self.starters:
+            try:
+                flow = Gtk.FlowBox()
+                flow.set_selection_mode(Gtk.SelectionMode.NONE)
+                flow.set_max_children_per_line(len(self.starters))
+                flow.set_column_spacing(8)
+                flow.set_row_spacing(8)
+                flow.set_homogeneous(False)
+                group = None
+                default = self.starters[-1]["id"] if self.starters[-1]["id"] == "own" else ""
+                for st in self.starters:
+                    chip = Gtk.RadioButton.new_with_label_from_widget(group, st["label"])
+                    group = group or chip
+                    chip.set_mode(False)                  # a toggle chip, not a dot
+                    chip.get_style_context().add_class("hb-chip")
+                    chip.set_can_focus(False)
+                    chip.connect("toggled", self._starter_toggled, st["id"])
+                    flow.add(chip)
+                    if st["id"] == default:
+                        chip.set_active(True)
+                        self.starter_id = default
+                if not default:
+                    group.set_active(True)
+                    self.starter_id = self.starters[0]["id"]
+                card.pack_start(field("WHAT DO YOU WANT TO BUILD?", flow), False, False, 0)
+            except (TypeError, AttributeError, GLib.Error):
+                self.starter_id = ""           # no chips: OpenCode starts plain, as before
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         buttons.set_homogeneous(True)
@@ -863,6 +925,10 @@ class FullScreen(Gtk.Window):
             face.add_overlay(a)
             face.set_overlay_pass_through(a, True)    # clicks go to whatever is beneath
         return face
+
+    def _starter_toggled(self, chip, starter_id):
+        if chip.get_active():
+            self.starter_id = starter_id
 
     def attendee_name(self):
         if self.name_entry is None:
@@ -1252,6 +1318,8 @@ class Overlay:
         if self.hub:
             save_attendee(self.full.attendee_name(), agent["id"] if agent else "",
                           self.full.attendee_email(), self.full.attendee_telegram())
+        if agent and agent["id"] == "opencode" and self.full.starter_id:
+            save_starter(self.full.starter_id)
         self.we_started = True
         self.pending_agent = agent
         self.start_deadline = time.time() + 15

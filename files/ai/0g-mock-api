@@ -6,16 +6,25 @@
 # looking at once. Every response is marked mock: a "mock": true field, a "notice" line and an
 # X-Mock-Data header, so the app can show a "Mock data" badge.
 # Prices move as a smooth random walk of the clock, so polling looks live and two tabs agree.
-# Stdlib only, read only, no state. Runs as the hackbox-mock-api service on 127.0.0.1:4010.
+# One route is real, not mock: POST /v1/chat/completions (OpenAI shape, streaming too) and the
+# simpler POST /ai/chat relay to 0G Compute with the box's router key, so an app's browser
+# code gets live AI without ever holding the key. The key is the same per-box, credit-limited
+# key the attendee's shell already has; the service only listens on 127.0.0.1.
+# Stdlib only, no state. Runs as the hackbox-mock-api service on 127.0.0.1:4010.
 #   0g-mock-api [--port 4010] [--host 127.0.0.1]
 import argparse
+import glob
+import os
+import re
 import hashlib
 import json
 import math
 import random
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 NOTICE = "Mock data from 0g-mock-api on this hack-box. Not real market data."
 
@@ -239,26 +248,159 @@ ROUTES = {
 }
 
 
+
+# ----------------------------------------------------------- live AI ---
+
+def box_conf():
+    """KEY=value pairs from /etc/hackbox/conf.d (later files win), quotes stripped."""
+    out = {}
+    for f in sorted(glob.glob("/etc/hackbox/conf.d/*.conf")):
+        try:
+            for line in open(f, encoding="utf-8"):
+                m = re.match(r"\s*([A-Z_][A-Z0-9_]*)=(.*)$", line)
+                if m:
+                    out[m.group(1)] = m.group(2).strip().strip("'\"")
+        except OSError:
+            pass
+    return out
+
+
+def router_key():
+    try:
+        with open("/etc/hackbox/secrets/0g-router-key") as fh:
+            return "".join(fh.read().split())
+    except OSError:
+        return ""
+
+
+def ai_setup():
+    c = box_conf()
+    base = (c.get("OG_ROUTER_URL") or "https://router-api.0g.ai").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    default = c.get("OG_MODEL") or "glm-5.3"
+    allowed = [m for m in (default, c.get("OG_SMALL_MODEL"), c.get("OG_FALLBACK_MODEL")) if m]
+    return base, default, allowed
+
+
+AI_MAX_TOKENS = 4096
+UA = "hackbox-mock-api/1"
+
+
+def relay(handler, body, simple):
+    """Forward one chat request to the 0G Compute Router; stream back if asked."""
+    base, default, allowed = ai_setup()
+    key = router_key()
+    if not key:
+        handler.send(503, {"mock": False, "error": "no 0G Compute key on this box, ask staff"})
+        return
+    msgs = body.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            handler.send(400, {"mock": False, "error": "send messages: [...] or prompt: \"...\""})
+            return
+        msgs = ([{"role": "system", "content": str(body["system"])}] if body.get("system") else []) + \
+               [{"role": "user", "content": prompt}]
+    model = body.get("model") if body.get("model") in allowed else default
+    out = {k: v for k, v in body.items() if k in ("temperature", "top_p", "stop", "tools",
+                                                  "tool_choice", "response_format", "stream")}
+    out.update({"model": model, "messages": msgs,
+                "max_tokens": min(int(body.get("max_tokens") or 1024), AI_MAX_TOKENS)})
+    stream = bool(out.get("stream")) and not simple
+    if simple:
+        out.pop("stream", None)
+    req = Request(base + "/v1/chat/completions", data=json.dumps(out).encode(), method="POST",
+                  headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                           "User-Agent": UA, "X-0G-Provider-Sort": "latency"})
+    try:
+        resp = urlopen(req, timeout=300)
+    except HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode() or "{}")
+        except ValueError:
+            detail = {}
+        handler.send(e.code, {"mock": False, "error": "0G Compute returned %d" % e.code,
+                              "detail": detail})
+        return
+    except (URLError, OSError) as e:
+        handler.send(502, {"mock": False, "error": "0G Compute unreachable: %s" % e})
+        return
+    with resp:
+        if stream:
+            handler.send_response(200)
+            handler.cors()
+            handler.send_header("Content-Type", resp.headers.get("Content-Type", "text/event-stream"))
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("X-Mock-Data", "false")
+            handler.end_headers()
+            while True:
+                chunk = resp.read1(65536) if hasattr(resp, "read1") else resp.read(4096)
+                if not chunk:
+                    break
+                try:
+                    handler.wfile.write(chunk)
+                    handler.wfile.flush()
+                except OSError:
+                    break                      # the browser went away
+            return
+        data = json.loads(resp.read().decode() or "{}")
+    if not simple:
+        handler.send(200, data, mock=False)
+        return
+    try:
+        reply = data["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError, TypeError):
+        reply = ""
+    handler.send(200, {"mock": False, "source": "0G Compute", "model": data.get("model", model),
+                       "reply": reply, "usage": data.get("usage", {})}, mock=False)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "0g-mock-api/1"
 
     def log_message(self, *a):
         pass
 
-    def send(self, code, body):
+    def cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+    def send(self, code, body, mock=True):
         data = json.dumps(body, indent=1).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "*")
-        self.send_header("X-Mock-Data", "true")
+        self.cors()
+        self.send_header("X-Mock-Data", "true" if mock else "false")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
     def do_OPTIONS(self):
-        self.send(204, {})
+        self.send_response(204)
+        self.cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        path = urlparse(self.path).path.rstrip("/")
+        if path.startswith("/api/"):
+            path = path[4:]
+        if path not in ("/v1/chat/completions", "/chat/completions", "/ai/chat"):
+            self.send(404, {"mock": True, "error": "POST goes to /v1/chat/completions or /ai/chat",
+                            "see": "/"})
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(min(n, 2_000_000)).decode() or "{}")
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
+            self.send(400, {"mock": False, "error": "body must be a JSON object"})
+            return
+        relay(self, body, simple=(path == "/ai/chat"))
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -267,7 +409,19 @@ class Handler(BaseHTTPRequestHandler):
             path = path[4:]
         if path == "/":
             self.send(200, {"mock": True, "notice": NOTICE,
-                            "endpoints": {k: v[1] for k, v in ROUTES.items()}})
+                            "endpoints": {k: v[1] for k, v in ROUTES.items()},
+                            "live_ai": {
+                                "POST /ai/chat": "REAL 0G Compute. {prompt, system?} -> {reply}",
+                                "POST /v1/chat/completions": "REAL 0G Compute, OpenAI shape, "
+                                                             "stream supported (baseURL "
+                                                             "http://127.0.0.1:4010/v1, any apiKey)",
+                                "GET /v1/models": "models you can pass as model"}})
+            return
+        if path in ("/v1/models", "/models"):
+            _, default, allowed = ai_setup()
+            self.send(200, {"object": "list", "default": default,
+                            "data": [{"id": m, "object": "model", "owned_by": "0g"} for m in allowed]},
+                      mock=False)
             return
         r = ROUTES.get(path)
         if not r:

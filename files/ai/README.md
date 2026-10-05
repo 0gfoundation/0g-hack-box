@@ -85,13 +85,28 @@ pairs, an AI model and agent marketplace, NFT/data listings, news and wallet por
 trading dashboard or marketplace idea shows live looking data in a short session without an
 outside API key. `GET /` lists the endpoints. Every response carries `"mock": true`, a
 `notice` and an `X-Mock-Data: true` header, and the seeded AGENTS.md tells OpenCode to show a
-"Mock data" badge wherever it is used. Real AI still goes to 0G Compute and real contracts
-to the 0G chain.
+"Mock data" badge wherever it is used. One route is real, not mock: `POST /ai/chat`
+(`{prompt, system}` in, `{reply}` out) and the OpenAI compatible `POST /v1/chat/completions`
+(streaming too, `GET /v1/models`) relay to 0G Compute with the box's router key, so an app's
+browser code gets live AI without holding the key (the service reads the key through
+`SupplementaryGroups=hacker`, as the attendee's shell can, and listens on localhost only).
+Models are limited to OG_MODEL / OG_SMALL_MODEL / OG_FALLBACK_MODEL, max_tokens to 4096.
 
 ## Faster builds
 
 The seeded AGENTS.md asks OpenCode to plan in a few lines, keep its context small, and split
 independent work across subagents launched in one message so they run in parallel.
-`hackbox-ai-render` defines two subagents on the default model for that: `contract` (writes,
-funds the deployer with `0g-fund`, deploys to Galileo, returns address, ABI and explorer
-link) and `frontend` (UI wired to the contract and the mock API).
+`hackbox-ai-render` defines five subagents on the default model for that, and AGENTS.md asks
+for 3 to 5 of them in the first step: `contract` (writes, funds the deployer with
+`0g-fund`, deploys to Galileo, returns address, ABI and explorer link), `frontend` (UI wired
+to the contract, the mock API and the live AI relay), `designer` (polish), `reviewer` (runs
+the app and fixes bugs) and `pitch` (README.md and a 60 second DEMO.md). Every app is asked
+to include at least one live 0G Compute AI feature.
+
+## Idea starters
+
+`/etc/hackbox/ai/starters.json` lists the welcome screen's idea chips (AI market, Trading, AI
+agent, NFT drop, My own idea). The overlay saves the chosen id to `~/.cache/hackbox/starter`;
+`hackbox-agent opencode` turns it into OpenCode's first prompt (`--prompt`: the idea's brief
+plus the shared build tail) once, then deletes the file. "My own idea" has no brief, so
+OpenCode starts blank. Edit the briefs there; no code change needed.
