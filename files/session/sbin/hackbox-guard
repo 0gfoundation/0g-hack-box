@@ -1,0 +1,171 @@
+#!/bin/bash
+# Root watchdog for the attendee session (hackbox-guard.service, always on).
+# Every 2 seconds it:
+#   1. relaunches the overlay in the attendee's X session if it is not
+#      running (killing it is cosmetic: it comes back);
+#   2. starts a reset if the attendee's graphical session disappeared (X
+#      crashed, a logout slipped through) and LightDM's cleanup hook did not;
+#   5. (every 6 s) enables a display that was plugged in after X started, so a
+#      swapped or late-switched-on monitor gets a signal (xrandr --auto);
+#   3. restarts the timer unit if the state is active but the unit is not
+#      running (the clock cannot be paused by stopping the unit);
+#   4. retries a reset that got stuck in ending/resetting.
+# It never touches the session while a reset is running.
+set -uo pipefail
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+HACKER_USER=hacker HACKER_UID=2000
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+U=$HACKER_USER
+UIDN=$HACKER_UID
+RUN=/run/hackbox
+OVERLAY=/usr/local/lib/hackbox/hackbox-overlay
+
+log() { logger -t hackbox-guard -- "$*"; }
+now() { date +%s; }
+
+# Print "<session id> <display>" for the attendee's live X11 session.
+x_session() {
+  local sid props
+  for sid in $(loginctl show-user "$U" -p Sessions --value 2>/dev/null); do
+    props=$(loginctl show-session "$sid" -p Type -p State -p Display -p Class 2>/dev/null) || continue
+    grep -qx 'Type=x11' <<<"$props" || continue
+    grep -qx 'Class=user' <<<"$props" || continue
+    grep -qE '^State=(active|online)$' <<<"$props" || continue
+    echo "$sid $(sed -n 's/^Display=//p' <<<"$props")"
+    return 0
+  done
+  return 1
+}
+
+# XAUTHORITY of the attendee's session, read from one of its processes.
+x_authority() {
+  local pid xa
+  for pid in $(pgrep -u "$UIDN" | head -n 60); do
+    xa=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^XAUTHORITY=//p' | head -n 1)
+    [ -n "$xa" ] && { echo "$xa"; return 0; }
+  done
+  echo "/home/$U/.Xauthority"
+}
+
+overlay_running() { pgrep -u "$UIDN" -f "$OVERLAY" >/dev/null; }
+
+launch_overlay() {
+  local display=${1:-:0} xa
+  xa=$(x_authority)
+  # Preferred: a transient unit in the attendee's own user manager, so the
+  # overlay lives in user-2000.slice with everything else they run.
+  if timeout 10 systemd-run --user --machine="$U@.host" --collect --quiet \
+       --unit="hackbox-overlay-$(now)" \
+       --setenv=DISPLAY="$display" --setenv=XAUTHORITY="$xa" \
+       --setenv=DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UIDN/bus" \
+       --setenv=XDG_RUNTIME_DIR="/run/user/$UIDN" \
+       "$OVERLAY" >/dev/null 2>&1; then
+    log "overlay relaunched (user unit)"
+    return 0
+  fi
+  # Fallback: plain runuser, detached. Still dies with the reset (pkill -u).
+  setsid runuser -u "$U" -- env DISPLAY="$display" XAUTHORITY="$xa" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UIDN/bus" \
+    XDG_RUNTIME_DIR="/run/user/$UIDN" HOME="/home/$U" \
+    "$OVERLAY" </dev/null >/dev/null 2>&1 &
+  log "overlay relaunched (runuser)"
+}
+
+# 5. A monitor plugged in, switched on or swapped after X started stays dark:
+# the output is "connected" but nothing enables it in this bare session, so the
+# HDMI carries no signal. The query itself re-probes the connectors; a connected
+# output with no geometry gets `xrandr --auto`. The overlay re-lays itself out.
+fix_outputs() {
+  local display=${1:-:0} xa out
+  xa=$(x_authority)
+  out=$(timeout 5 runuser -u "$U" -- env DISPLAY="$display" XAUTHORITY="$xa" \
+        xrandr --query 2>/dev/null) || return 0
+  if printf '%s\n' "$out" | grep -Eq '^[A-Za-z0-9-]+ connected( primary)? \('; then
+    if timeout 10 runuser -u "$U" -- env DISPLAY="$display" XAUTHORITY="$xa" \
+         xrandr --auto >/dev/null 2>&1; then
+      log "enabled a newly connected display on $display"
+    fi
+  fi
+}
+
+reset_busy() {
+  local s
+  for s in hackbox-reset.service hackbox-home.service; do
+    case "$(systemctl show -p ActiveState --value "$s" 2>/dev/null)" in
+      activating|deactivating) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+request_reset() {
+  log "$1: starting an immediate reset"
+  : > "$RUN/reset-now"
+  systemctl --no-block start hackbox-reset.service
+}
+
+gen_seen=""
+seen=0            # an attendee X session existed since the last reset
+cur_sid=""
+sid_since=0
+lost_since=0
+stuck_since=0
+last_launch=0
+tick=0
+
+while :; do
+  sleep 2
+  state=$(cat "$RUN/state" 2>/dev/null || true)
+  gen=$(cat "$RUN/generation" 2>/dev/null || true)
+  if [ "$gen" != "$gen_seen" ]; then
+    gen_seen=$gen; seen=0; lost_since=0; cur_sid=""
+  fi
+
+  if reset_busy; then
+    stuck_since=0; lost_since=0
+    continue
+  fi
+
+  # 4. stuck ending/resetting with no reset running.
+  case "$state" in
+    ending|resetting)
+      [ "$stuck_since" -gt 0 ] || stuck_since=$(now)
+      if [ $(( $(now) - stuck_since )) -ge 30 ]; then
+        stuck_since=0
+        request_reset "state '$state' with no reset running"
+      fi
+      continue
+      ;;
+    *) stuck_since=0 ;;
+  esac
+
+  # 3. the clock must run while active.
+  if [ "$state" = active ] && ! systemctl is-active -q hackbox-session.service; then
+    log "state active but the timer is not running, restarting it"
+    systemctl --no-block start hackbox-session.service
+  fi
+
+  # 1 and 2. the attendee's X session.
+  if info=$(x_session); then
+    sid=${info%% *}; display=${info#* }
+    if [ "$sid" != "$cur_sid" ]; then cur_sid=$sid; sid_since=$(now); fi
+    seen=1; lost_since=0
+    # Give autostart a head start, then make sure the overlay runs.
+    if ! overlay_running && [ $(( $(now) - sid_since )) -ge 8 ] &&
+       [ $(( $(now) - last_launch )) -ge 10 ]; then
+      last_launch=$(now)
+      launch_overlay "${display:-:0}"
+    fi
+    # 5. every 6 s: light up a display that was plugged in late.
+    tick=$(( (tick + 1) % 3 ))
+    [ "$tick" -eq 0 ] && fix_outputs "${display:-:0}"
+  elif [ "$seen" = 1 ] && systemctl is-active -q lightdm.service; then
+    [ "$lost_since" -gt 0 ] || lost_since=$(now)
+    if [ $(( $(now) - lost_since )) -ge 15 ]; then
+      seen=0; lost_since=0
+      request_reset "the attendee's X session is gone"
+    fi
+  fi
+done

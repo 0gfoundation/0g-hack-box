@@ -1,0 +1,1045 @@
+openapi: 3.0.3
+info:
+  title: hack-box session hub
+  version: 1.0.0
+  description: |
+    The hub behind the 0G hack-boxes: session registry, archive store, attendee
+    download pages, GitHub push queue and the staff dashboard.
+
+    Three surfaces:
+
+    - Box API (`/api/v1/*`): called only by `hackbox-hubagent` on each box, with
+      `Authorization: Bearer <box token>`. The hub config maps tokens to box names.
+    - Public pages (`/d/*`, `/code`, `/healthz`): the only paths the Cloudflare tunnel carries.
+    - Dashboard (`/`, `/dash/*`): tailnet only, no auth of its own.
+
+    Tunnel guard: any request to `/`, `/dash/*` or `/api/*` that carries a
+    `Cf-Connecting-IP` header gets 404, so a tunnel misconfiguration cannot publish them.
+
+    Box address guard: a TCP peer address that made an authenticated box API call (box
+    token, enrolled token or enroll token) in the last 24 h gets 403 on `/` and `/dash/*`.
+    Loopback is exempt. The list is kept in memory.
+
+    Box tokens are the `boxes` map of the config plus the tokens handed out by
+    POST /api/v1/enroll. The fleet enroll token is accepted only by /api/v1/enroll.
+
+    Times are Unix seconds. JSON in and out unless noted.
+servers:
+  - url: http://localhost:8210
+    description: local or tailnet
+  - url: https://hackbox.udhaykumarbala.dev
+    description: public tunnel (public pages only)
+tags:
+  - name: box
+    description: Box agent API (bearer token)
+  - name: public
+    description: Attendee pages
+  - name: dashboard
+    description: Staff dashboard (tailnet only)
+
+components:
+  securitySchemes:
+    boxToken:
+      type: http
+      scheme: bearer
+      description: Per-box token from the hub config (`boxes` map).
+  parameters:
+    SessionID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Opaque session id returned by POST /api/v1/sessions.
+    DownloadToken:
+      name: token
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z2-7]{32}$' }
+  responses:
+    Unauthorized:
+      description: Missing or unknown box token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Unknown id, or the session belongs to another box.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Empty:
+      description: Done.
+      content:
+        application/json:
+          schema: { type: object, additionalProperties: false, example: {} }
+  schemas:
+    CreditReply:
+      type: object
+      properties:
+        outcome: { type: string, enum: [granted, already, limit, rejected, error] }
+        wallet: { type: string, description: 'Lowercase address the reply is about.' }
+        amount: { type: string, example: '$10' }
+        message: { type: string, description: 'Sentence shown to the attendee.' }
+    FundReply:
+      type: object
+      properties:
+        outcome:
+          type: string
+          enum: [queued, executing, completed, already, failed, refused, unknown, limit, inactive, error]
+          description: |
+            queued / executing: on its way. completed / already: the wallet has it. failed: the
+            faucet could not send (call again to retry). refused: the faucet said no, e.g. the
+            wallet had a drip in the last 24 h. unknown: the faucet did not answer (call again;
+            it never sends twice). limit: a hub cap is reached. inactive: the session is not
+            running. error: bad request, unknown link or rate limit.
+        wallet: { type: string, description: 'Lowercase address the reply is about.' }
+        amount: { type: string, example: '0.5', description: 'Testnet 0G of this transfer.' }
+        status: { type: string, enum: [queued, executing, completed, failed], description: 'The faucet transfer status, when there is one.' }
+        tx_hash: { type: string, example: '0x5f3c...' }
+        explorer_url: { type: string, example: 'https://chainscan-galileo.0g.ai/tx/0x5f3c...' }
+        session_remaining: { type: string, example: '0.5', description: '0G this session can still send.' }
+        message: { type: string, description: 'One sentence for the attendee or their AI agent: what happened and what to do next.' }
+    FundList:
+      type: object
+      properties:
+        active: { type: boolean, description: 'The box reports this session as running now.' }
+        amount: { type: string, example: '0.5', description: '0G per transfer.' }
+        session_max: { type: string, example: '1' }
+        session_remaining: { type: string, example: '0.5' }
+        transfers:
+          type: array
+          description: Newest first.
+          items: { $ref: '#/components/schemas/FundReply' }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    CreateSessionRequest:
+      type: object
+      properties:
+        name: { type: string, description: 'Attendee name, cleaned by the agent (max 40 printable chars). Empty is allowed.' }
+        agent: { type: string, example: claude }
+        minutes: { type: integer, example: 30 }
+        started_at: { type: integer, format: int64, description: 'Session start; 0 means now.' }
+        local_code: { type: string, description: 'The box''s own pickup code if known; may be empty. Stored, not used yet.' }
+        email:
+          type: string
+          maxLength: 120
+          description: Optional attendee email. Trimmed; if it does not look like local@domain.tld (or is not a string) it is stored as "" and the session is still created. Shown to staff only, never on the public page or in the GitHub repo.
+          example: ada@example.com
+        telegram:
+          type: string
+          description: Optional Telegram handle, with or without a leading "@". Trimmed, one "@" stripped, then it must match ^[A-Za-z0-9_]{5,32}$; stored as "@name", or "" if invalid (the session is still created). Staff only, like email.
+          example: '@ada_lovelace'
+    CreateSessionResponse:
+      type: object
+      required: [id, token, code, url, expires_at]
+      properties:
+        id: { type: string, example: 3ndygixfs5sutvde }
+        token: { type: string, description: '32 chars, lowercase base32', example: uktyji6v2ifs7fzohlrda6vdeyb6apx6 }
+        code: { type: string, description: '6 chars from ABCDEFGHJKLMNPQRSTUVWXYZ23456789, unique among unexpired sessions', example: K7MZQ2 }
+        url: { type: string, example: 'https://hackbox.udhaykumarbala.dev/d/uktyji6v2ifs7fzohlrda6vdeyb6apx6' }
+        expires_at: { type: integer, format: int64, description: 'Start (or now) plus download_days. Pushed out to ended_at plus download_days when the session ends.' }
+    HeartbeatRequest:
+      type: object
+      properties:
+        session_id:
+          description: Current session id, empty or null when idle. A number is accepted too.
+          oneOf: [ { type: string }, { type: integer }, { nullable: true } ]
+        state: { type: string, enum: [idle, active, ending, resetting] }
+        seconds_left: { type: integer }
+        extend_request_at:
+          type: integer
+          format: int64
+          description: Non-zero when the attendee asked for more time. One request per (session, extend_request_at).
+        status:
+          type: object
+          description: Output of `hackbox status --json`, stored as is.
+        activity:
+          type: array
+          maxItems: 12
+          description: |
+            Optional. Friendly names of the programs the attendee runs. Entries that are not
+            strings of 1 to 32 printable characters are dropped; at most 12 are kept. Replaces
+            the stored list on every heartbeat (omitted means empty); cleared when state is idle.
+          items: { type: string, minLength: 1, maxLength: 32 }
+          example: [Terminal, OpenCode, Chromium]
+        applied_config_version:
+          type: string
+          description: Optional. The config version the box last applied ("" for none). Omitted leaves the stored value unchanged.
+        usage: { $ref: '#/components/schemas/UsageReport' }
+    UsageReport:
+      type: object
+      description: |
+        Optional. The session's OpenCode token totals, summed by the box agent from a copy of
+        the attendee's opencode.db (assistant messages only, like hub/deploy/token-usage.sh).
+        Stored only for a session this box owns. Every counter must be an integer 0..1e15; a
+        malformed object (or larger than 16 KB) is ignored, it never fails the call. The hub
+        keeps the highest value seen of each counter and of each model, so a lower report
+        never lowers the stored totals. At most 32 models; names are cleaned to 80 characters.
+      properties:
+        input: { type: integer, format: int64, minimum: 0, example: 120000 }
+        output: { type: integer, format: int64, minimum: 0, example: 30000 }
+        reasoning: { type: integer, format: int64, minimum: 0, example: 4000 }
+        cache_read: { type: integer, format: int64, minimum: 0, example: 900000 }
+        cache_write: { type: integer, format: int64, minimum: 0, example: 0 }
+        replies: { type: integer, format: int64, minimum: 0, description: Assistant messages counted., example: 14 }
+        models:
+          type: object
+          description: Model id to that model's input + output + reasoning tokens.
+          additionalProperties: { type: integer, format: int64, minimum: 0 }
+          example: { 0gm-1.0-35b-a3b: 154000 }
+    Usage:
+      type: object
+      nullable: true
+      description: Stored token totals of one session (the maximum seen of each counter); null when the box never reported any.
+      properties:
+        input: { type: integer, format: int64 }
+        output: { type: integer, format: int64 }
+        reasoning: { type: integer, format: int64 }
+        cache_read: { type: integer, format: int64 }
+        cache_write: { type: integer, format: int64 }
+        replies: { type: integer, format: int64 }
+        models: { type: object, additionalProperties: { type: integer, format: int64 } }
+        updated_at: { type: integer, format: int64, description: Last report. }
+    UsageTotals:
+      type: object
+      description: Every stored session's usage added up (not only the sessions listed).
+      properties:
+        input: { type: integer, format: int64 }
+        output: { type: integer, format: int64 }
+        reasoning: { type: integer, format: int64 }
+        cache_read: { type: integer, format: int64 }
+        cache_write: { type: integer, format: int64 }
+        replies: { type: integer, format: int64 }
+        sessions: { type: integer, description: Sessions with at least one reply. }
+    DashFunding:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        session_id: { type: string }
+        box: { type: string }
+        attendee: { type: string }
+        email: { type: string }
+        telegram: { type: string }
+        wallet: { type: string, example: '0x1234567890abcdef1234567890abcdef12345678' }
+        amount_milli: { type: integer, format: int64, description: milli-0G, example: 500 }
+        amount_og: { type: string, example: '0.5' }
+        status: { type: string, enum: [queued, executing, completed, failed, refused, unknown] }
+        counted: { type: boolean, description: 'Uses up the caps and the budget (queued, executing, completed, unknown).' }
+        tx_hash: { type: string }
+        tx_url: { type: string, description: 'Explorer link (faucet.explorer_tx_url, default https://chainscan-galileo.0g.ai/tx/<hash>); "" unless tx_hash is 0x plus 64 hex.' }
+        detail: { type: string }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    DashReward:
+      type: object
+      properties:
+        session_id: { type: string }
+        box: { type: string }
+        attendee: { type: string }
+        email: { type: string }
+        telegram: { type: string }
+        wallet: { type: string }
+        amount_micros: { type: integer, format: int64, example: 10000000 }
+        amount_usd: { type: string, example: '$10' }
+        outcome: { type: string, enum: [granted, duplicate, rejected, error] }
+        credited: { type: boolean, description: granted or duplicate. }
+        detail: { type: string }
+        created_at: { type: integer, format: int64 }
+    FundingTotals:
+      type: object
+      properties:
+        enabled: { type: boolean, description: The faucet is configured. }
+        funded_milli: { type: integer, format: int64, description: 'Counted transfers since faucet.event_since, the same sum the event budget cap uses.' }
+        funded_og: { type: string, example: '12.5' }
+        completed_milli: { type: integer, format: int64 }
+        completed_og: { type: string }
+        budget_milli: { type: integer, format: int64, description: 'faucet.event_budget_og; 0 when the faucet is off.' }
+        budget_og: { type: string, example: '50' }
+        transfers: { type: integer, description: Every funding row, any status. }
+        wallets: { type: integer, description: Distinct wallets with a counted transfer since event_since. }
+    RewardTotals:
+      type: object
+      properties:
+        enabled: { type: boolean, description: 0G Pay credits are configured. }
+        granted_micros: { type: integer, format: int64 }
+        granted_usd: { type: string, example: '$40' }
+        granted: { type: integer, description: Claims that credited the wallet. }
+        claims: { type: integer, description: Every claim row, any outcome. }
+        per_claim_usd: { type: string, example: '$10', description: '"" when Pay is off.' }
+    Command:
+      type: object
+      required: [id, op, minutes]
+      properties:
+        id: { type: string, example: '12' }
+        op: { type: string, enum: [extend, end, done], description: 'done ends the time-up screen early (staff Finish), like the attendee pressing Done.' }
+        minutes: { type: integer, description: '1..60 for extend, 0 for end and done' }
+    HeartbeatResponse:
+      type: object
+      required: [commands, extend]
+      properties:
+        commands:
+          type: array
+          description: Commands for this box not picked before. They are marked picked now. Commands not picked within 120 s are dropped.
+          items: { $ref: '#/components/schemas/Command' }
+        extend:
+          type: object
+          required: [status, minutes]
+          properties:
+            status: { type: string, enum: [none, pending, approved, declined] }
+            minutes: { type: integer, description: 'Approved minutes, 0 otherwise' }
+        config_version:
+          type: string
+          description: The agent config version the hub wants on this box. Empty string when nothing is set. Always present.
+          example: 2cf3336e1cdd99c3
+    BoxConfig:
+      type: object
+      required: [version, secrets]
+      properties:
+        version:
+          type: string
+          description: 'First 16 hex chars of sha256 over the sorted "name=value" lines of the effective config; "" when nothing is set. Same value as heartbeat config_version.'
+          example: 2cf3336e1cdd99c3
+        secrets:
+          type: object
+          description: Only the names that are set. Always an object, maybe empty.
+          properties:
+            anthropic-api-key: { type: string }
+            0g-router-key: { type: string }
+          additionalProperties: false
+        agents:
+          type: array
+          description: Omitted when no agent choice is set; the box then keeps its own.
+          items: { type: string, enum: [claude, claude-0g, opencode] }
+    ConfigNameState:
+      type: object
+      properties:
+        set: { type: boolean, description: This scope has its own value. }
+        updated_at: { type: integer, format: int64, description: 'Of the row that applies (own, or the default when inherited); 0 when neither.' }
+        inherited: { type: boolean, description: 'Box scope only: no own value, the default has one.' }
+    DashConfigScope:
+      type: object
+      properties:
+        scope: { type: string, description: '"*" (default, all boxes) or a box name' }
+        names:
+          type: object
+          properties:
+            anthropic-api-key: { $ref: '#/components/schemas/ConfigNameState' }
+            0g-router-key: { $ref: '#/components/schemas/ConfigNameState' }
+            agents: { $ref: '#/components/schemas/ConfigNameState' }
+        agents: { type: array, items: { type: string }, description: This scope's own agent list, empty when not set. }
+        effective_agents: { type: array, items: { type: string }, description: What applies (own, else default). }
+        config_version: { type: string, description: 'Box scopes: the version the box should run. "" for the default scope.' }
+    DashConfig:
+      type: object
+      description: Never contains secret values.
+      properties:
+        known_agents: { type: array, items: { type: string }, example: [claude, claude-0g, opencode] }
+        scopes:
+          type: array
+          description: The default scope first, then one per configured box.
+          items: { $ref: '#/components/schemas/DashConfigScope' }
+    DashConfigUpdate:
+      type: object
+      required: [scope]
+      properties:
+        scope: { type: string, description: '"*" or a configured box name; anything else is 400' }
+        set:
+          type: object
+          description: |
+            Secrets: printable ASCII, no whitespace, 8 to 512 chars. agents: space separated
+            from claude, claude-0g, opencode, at least one, no duplicates. An empty string
+            means "leave as is".
+          properties:
+            anthropic-api-key: { type: string }
+            0g-router-key: { type: string }
+            agents: { type: string, example: claude opencode }
+        clear:
+          type: array
+          description: Names to remove at this scope. At box scope the default applies again.
+          items: { type: string, enum: [anthropic-api-key, 0g-router-key, agents] }
+    CommandResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        message: { type: string }
+    EndRequest:
+      type: object
+      properties:
+        ended_at: { type: integer, format: int64 }
+        reason: { type: string, example: timeout }
+        empty: { type: boolean, description: 'true when there was nothing in ~/project to archive. Ignored if an archive was already uploaded.' }
+        usage: { $ref: '#/components/schemas/UsageReport' }
+    DashRequest:
+      type: object
+      nullable: true
+      properties:
+        id: { type: integer }
+        asked_at: { type: integer, format: int64 }
+        status: { type: string, enum: [pending] }
+        minutes: { type: integer }
+    DashBox:
+      type: object
+      properties:
+        name: { type: string }
+        online: { type: boolean, description: 'last_seen within 15 s' }
+        last_seen: { type: integer, format: int64 }
+        state: { type: string }
+        seconds_left: { type: integer }
+        session_id: { type: string }
+        attendee: { type: string }
+        email: { type: string, description: 'Attendee email of the current session, "" when none' }
+        telegram: { type: string, description: 'Attendee Telegram handle of the current session ("@name"), "" when none' }
+        agent: { type: string }
+        started_at: { type: integer, format: int64 }
+        minutes: { type: integer }
+        extended_minutes: { type: integer }
+        code: { type: string }
+        request: { $ref: '#/components/schemas/DashRequest' }
+        config_version: { type: string, description: The agent config version the hub wants on this box. }
+        applied_config_version: { type: string, description: The version the box last reported applying. }
+        activity: { type: array, items: { type: string }, description: 'Programs open on the box, [] when idle or never reported.' }
+        enrolled: { type: boolean, description: The name came from POST /api/v1/enroll. }
+        mac: { type: string, description: 'Bound MAC for enrolled boxes, else ""' }
+        enrolled_at: { type: integer, format: int64 }
+        config_up_to_date: { type: boolean, description: 'config_version == applied_config_version ("keys up to date", else "keys pending, applies at next idle")' }
+        status: { type: object }
+        usage: { $ref: '#/components/schemas/Usage' }
+    DashSession:
+      type: object
+      properties:
+        id: { type: string }
+        box: { type: string }
+        name: { type: string }
+        agent: { type: string }
+        code: { type: string }
+        local_code: { type: string }
+        email: { type: string }
+        telegram: { type: string, example: '@ada_lovelace' }
+        minutes: { type: integer }
+        extended_minutes: { type: integer }
+        started_at: { type: integer, format: int64 }
+        ended_at: { type: integer, format: int64 }
+        duration_seconds: { type: integer }
+        end_reason: { type: string }
+        archive_bytes: { type: integer }
+        empty: { type: boolean }
+        github_status: { type: string, enum: [disabled, queued, pushed, failed] }
+        github_repo: { type: string }
+        github_url: { type: string }
+        github_error: { type: string }
+        download_url: { type: string, description: 'Staff zip link, empty when there is no archive' }
+        public_url: { type: string }
+        expires_at: { type: integer, format: int64 }
+        usage: { $ref: '#/components/schemas/Usage' }
+        fundings:
+          type: array
+          description: This session's faucet transfers, newest first; [] when none.
+          items:
+            type: object
+            properties:
+              wallet: { type: string }
+              amount_og: { type: string }
+              status: { type: string }
+              tx_url: { type: string }
+        reward:
+          type: object
+          nullable: true
+          description: This session's 0G Pay claim, null when none.
+          properties:
+            wallet: { type: string }
+            amount_usd: { type: string }
+            outcome: { type: string }
+            credited: { type: boolean }
+    DashState:
+      type: object
+      properties:
+        now: { type: integer, format: int64 }
+        boxes: { type: array, items: { $ref: '#/components/schemas/DashBox' } }
+        sessions:
+          type: array
+          description: Last 200 sessions, newest first.
+          items: { $ref: '#/components/schemas/DashSession' }
+        usage_totals: { $ref: '#/components/schemas/UsageTotals' }
+        fundings:
+          type: array
+          description: Newest 300 faucet transfers, newest first (GET /dash/fundings.csv has all).
+          items: { $ref: '#/components/schemas/DashFunding' }
+        rewards:
+          type: array
+          description: Newest 300 reward claims, newest first (GET /dash/rewards.csv has all).
+          items: { $ref: '#/components/schemas/DashReward' }
+        funding_totals: { $ref: '#/components/schemas/FundingTotals' }
+        reward_totals: { $ref: '#/components/schemas/RewardTotals' }
+    EnrollRequest:
+      type: object
+      required: [mac]
+      properties:
+        mac: { type: string, pattern: '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$', description: 'Lowercased by the hub before checking.', example: 'aa:bb:cc:dd:ee:ff' }
+        current_hostname: { type: string, example: hackbox-eeff }
+    EnrollResponse:
+      type: object
+      required: [name, token]
+      properties:
+        name: { type: string, example: hackbox2 }
+        token: { type: string, description: 'New box token, 40 lowercase base32 chars. Use as Bearer for every other box call.', pattern: '^[a-z2-7]{40}$' }
+    CommandQueued:
+      type: object
+      properties:
+        command_id: { type: string }
+
+paths:
+  /api/v1/sessions:
+    post:
+      tags: [box]
+      summary: Register a new session
+      security: [ { boxToken: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSessionRequest' }
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateSessionResponse' }
+        '400': { description: 'Bad JSON or minutes out of range.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/sessions/{id}/qr.png:
+    get:
+      tags: [box]
+      summary: QR code of the session's download URL
+      security: [ { boxToken: [] } ]
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      responses:
+        '200':
+          description: 512x512 PNG.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/heartbeat:
+    post:
+      tags: [box]
+      summary: Box status every 3 s; returns pending commands and the extend status
+      security: [ { boxToken: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HeartbeatRequest' }
+      responses:
+        '200':
+          description: Commands to run and the latest extend request status for the current session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HeartbeatResponse' }
+        '400': { description: 'Bad JSON.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/commands/{id}/result:
+    post:
+      tags: [box]
+      summary: Report how a command went
+      description: A successful `extend` adds its minutes to the session's extended_minutes (once).
+      security: [ { boxToken: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CommandResult' }
+      responses:
+        '200': { $ref: '#/components/responses/Empty' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/sessions/{id}/end:
+    post:
+      tags: [box]
+      summary: Mark a session ended
+      security: [ { boxToken: [] } ]
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EndRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/Empty' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/sessions/{id}/archive:
+    put:
+      tags: [box]
+      summary: Upload ~/project as a .tar.gz
+      description: |
+        Raw body, at most 250 MB. Stored as `<data>/archives/<id>.tar.gz` after the whole
+        gzip and tar stream reads cleanly. A second upload replaces the first. Queues the
+        GitHub push when a token is configured. Only the box that owns the session may upload.
+      security: [ { boxToken: [] } ]
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema: { type: string, format: binary }
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200': { $ref: '#/components/responses/Empty' }
+        '400': { description: 'Not a valid .tar.gz, or the upload broke off.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { description: 'Larger than 250 MB.' }
+
+  /api/v1/config:
+    get:
+      tags: [box]
+      summary: The effective agent config for this box (keys and offered agents)
+      description: |
+        Per name, the box's own value, else the default ("*"). The box fetches this when the
+        heartbeat config_version differs from what it applied, and applies it only when idle.
+      security: [ { boxToken: [] } ]
+      responses:
+        '200':
+          description: Effective config, with secret values.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BoxConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/enroll:
+    post:
+      tags: [box]
+      summary: Get a box name and token with the fleet enroll token
+      description: |
+        Bearer is the config `enroll_token` (and only here). The same MAC always gets the same
+        name back, with a new token; the old enrolled token stops working. A new MAC gets the
+        lowest free `<name_prefix>N` (N >= 1): a name is taken when it is bound to a MAC or has
+        ever sent a heartbeat. Names that only exist as unused config tokens are free and get
+        bound. Limited to 10 calls per minute per client address, counting failed ones.
+      security: [ { boxToken: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollRequest' }
+      responses:
+        '200':
+          description: Enrolled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollResponse' }
+        '400': { description: 'Bad JSON or MAC.' }
+        '401': { description: 'Missing or wrong enroll token, or enrollment is off (no enroll_token in the config).' }
+        '429': { description: 'More than 10 calls in a minute from this address.' }
+
+  /d/{token}:
+    get:
+      tags: [public]
+      summary: Attendee download page
+      description: |
+        HTML. States: preparing (no archive yet; refreshes every 3 s), ready (Download
+        button), empty (nothing new in ~/project), expired (410).
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      responses:
+        '200': { description: 'Preparing, ready or empty page.', content: { text/html: {} } }
+        '404': { description: 'Unknown token page.', content: { text/html: {} } }
+        '410': { description: 'Expired page.', content: { text/html: {} } }
+
+  /d/{token}/download:
+    get:
+      tags: [public]
+      summary: The project as hackbox-<code>.zip
+      description: |
+        Converted on the fly from the stored tarball. Regular files and directories only,
+        all under `<code>-project/`. Symlinks, links, devices and unsafe paths are left out.
+        Before the archive exists it redirects back to the page.
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      responses:
+        '200':
+          description: 'Zip stream, with Content-Disposition attachment; filename="hackbox-<code>.zip".'
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '303': { description: 'Not ready yet; back to /d/{token}.' }
+        '404': { description: 'Unknown token.' }
+        '410': { description: 'Expired.' }
+
+  /d/{token}/credit:
+    post:
+      tags: [public]
+      summary: Grant the session's 0G Compute credit to a wallet
+      description: |
+        Only when the hub has a `pay` config (0G Pay partner regrant). One grant per session,
+        `pay.max_per_wallet` (2) grants per wallet over all sessions, 10 calls per minute per
+        address. Allowed once the session is ready or empty, or while it is preparing if its box is on the time-up screen for this session (otherwise preparing answers 409; expired 410).
+        The body carries the EVM address the attendee connected or pasted; mixed-case addresses
+        must pass the EIP-55 checksum. The hub posts one row to `POST /v1/regrants` of the Pay
+        API with `external_ref` = `<signer>:<ref_tag>:<session id>`, so retries are idempotent.
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet]
+              properties:
+                wallet: { type: string, pattern: '^0x[0-9a-fA-F]{40}$', example: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }
+      responses:
+        '200':
+          description: Granted now (`granted`), or this session was credited before (`already`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreditReply' }
+        '400': { description: 'Bad address or checksum typo.', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+        '404': { description: 'Unknown token, or credits are not enabled on this hub.' }
+        '409': { description: 'Wallet at its limit (`limit`), or the session is still running (the reward opens on the time-up screen).', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+        '410': { description: 'Expired link.' }
+        '429': { description: 'More than 10 tries in a minute.' }
+        '502': { description: 'Pay rejected the row (`rejected`, e.g. lot_unusable) or did not answer (`error`).', content: { application/json: { schema: { $ref: '#/components/schemas/CreditReply' } } } }
+
+  /d/{token}/fund:
+    post:
+      tags: [public]
+      summary: Send testnet 0G to a wallet during the session (the 0g-fund CLI)
+      description: |
+        Only when the hub has a `faucet` config (an API key for the 0G faucet's service-account
+        API, POST /v1/transfers). The faucet key stays on the hub; a box only knows its session
+        link (`/run/hackbox/hub-url`), so the attendee's agent calls this through the public host.
+
+        Works only while the session is running: the session has not ended and the box's last
+        heartbeat (within 30 s) reports it `active`. One transfer per session and wallet; the
+        same call again returns that transfer instead of sending twice. Caps (config, in 0G):
+        `session_max_og` (1) per session over its wallets, `wallet_max_og` (1) per wallet over all
+        sessions, `box_hourly_max_og` (2) per box in any 60 minutes, `event_budget_og` (50) in
+        all since `event_since`. Queued, executing, completed and unknown transfers count;
+        failed and refused ones do not. `ip_per_minute` (30) calls per minute per client address
+        (box.0g.ai passes the visitor's address with the proxy key; the boxes of one venue share
+        it, so this is loose on purpose).
+
+        Faucet request: `request_id` = `user_id` = `<ref_tag>:<session id>:<wallet>` (plus `:<n>`
+        after a failed attempt), `promo_code` when configured, `reason` and `metadata` {source,
+        box, session}. With the fixed drip the faucet sends 0.5 0G and allows one drip per
+        wallet per 24 h, shared with the public faucet (then `refused`, 429).
+      parameters: [ { $ref: '#/components/parameters/DownloadToken' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet]
+              properties:
+                wallet: { type: string, pattern: '^0x[0-9a-fA-F]{40}$', example: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }
+      responses:
+        '200': { description: 'This session and wallet were funded before (`already`, `queued`, `executing`), or the faucet returned an existing transfer.', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '202': { description: 'Queued at the faucet (`queued`). Follow it with GET.', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '400': { description: 'Bad address or checksum typo, or the faucet refused the body.', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '403': { description: 'The session is not running (`inactive`).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '404': { description: 'Unknown token, or funding is not enabled on this hub.' }
+        '409': { description: 'A hub cap is reached (`limit`), or the faucet refused (promo exhausted or its per-wallet limit).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '429': { description: 'Too many calls from this address, or the faucet funded this wallet in the last 24 h (`refused`, with the time it can get more).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+        '502': { description: 'The faucet did not answer (`unknown`), the transfer failed (`failed`), or the hub key is not accepted (`refused`).', content: { application/json: { schema: { $ref: '#/components/schemas/FundReply' } } } }
+    get:
+      tags: [public]
+      summary: This session's transfers and what it can still send
+      description: |
+        Transfers still on their way are refreshed from the faucet (GET /v1/transfers/{id}, at
+        most every 2 s each). Works after the session too, until the link expires. `?wallet=`
+        limits the list to one address. 10 times `ip_per_minute` calls per minute per address.
+      parameters:
+        - { $ref: '#/components/parameters/DownloadToken' }
+        - { name: wallet, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: 'The list.', content: { application/json: { schema: { $ref: '#/components/schemas/FundList' } } } }
+        '400': { description: 'Bad wallet in the query.' }
+        '404': { description: 'Unknown token, or funding is not enabled on this hub.' }
+        '410': { description: 'Expired link.' }
+        '429': { description: 'Too many calls.' }
+
+  /c/{code}:
+    get:
+      tags: [public]
+      summary: Short link for a session (typeable)
+      description: |
+        `/c/K7MZQ2` redirects (303) to the session's `/d/{token}` page; case, spaces and dashes in
+        the code do not matter. Unknown code: the code form with "No session with that code"
+        (404). Same limiter as POST /code: 5 tries a minute per address (429).
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string, example: K7MZQ2 }
+      responses:
+        '303': { description: 'Redirect to /d/{token}.' }
+        '400': { description: 'Not a 6 character code.', content: { text/html: {} } }
+        '404': { description: 'No live session with that code.', content: { text/html: {} } }
+        '429': { description: 'Too many tries.', content: { text/html: {} } }
+
+  /code:
+    get:
+      tags: [public]
+      summary: Form to type the 6 character code
+      responses:
+        '200': { description: 'HTML form.', content: { text/html: {} } }
+    post:
+      tags: [public]
+      summary: Look up a code
+      description: Limited to 5 tries per minute per client IP (Cf-Connecting-IP when present).
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                code: { type: string, example: K7MZQ2 }
+      responses:
+        '303': { description: 'Found; Location: /d/{token}' }
+        '400': { description: 'Not 6 characters; form shown again.' }
+        '404': { description: 'No unexpired session with that code; form shown again.' }
+        '429': { description: 'Too many tries page.' }
+
+  /healthz:
+    get:
+      tags: [public]
+      summary: Liveness
+      responses:
+        '200':
+          description: The text `ok`.
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /:
+    get:
+      tags: [dashboard]
+      summary: Dashboard page (self-contained HTML, polls /dash/state every 2 s)
+      responses:
+        '200': { description: 'HTML.', content: { text/html: {} } }
+        '404': { description: 'Came through the tunnel.' }
+
+  /dash/state:
+    get:
+      tags: [dashboard]
+      summary: Boxes, the last 200 sessions, token usage, funded wallets and rewards
+      responses:
+        '200':
+          description: Current state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashState' }
+
+  /dash/boxes/{box}/extend:
+    post:
+      tags: [dashboard]
+      summary: Queue an extend for a box
+      description: 'Requires Content-Type application/json; a browser Origin must match the Host.'
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minutes]
+              properties:
+                minutes: { type: integer, minimum: 1, maximum: 60 }
+      responses:
+        '200':
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '400': { description: 'minutes out of range.' }
+        '403': { description: 'Cross-origin request.' }
+        '404': { description: 'Unknown box.' }
+        '415': { description: 'Not JSON.' }
+
+  /dash/boxes/{box}/end:
+    post:
+      tags: [dashboard]
+      summary: Queue an end for a box
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '403': { description: 'Cross-origin request.' }
+        '404': { description: 'Unknown box.' }
+        '415': { description: 'Not JSON.' }
+
+  /dash/boxes/{box}/finish:
+    post:
+      tags: [dashboard]
+      summary: End the time-up screen on a box (queues a done command)
+      description: Only while the box's last reported state is ending. Same guards as the other dashboard POSTs.
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '403': { description: Cross-origin request. }
+        '404': { description: Unknown box. }
+        '409': { description: 'The box is not in state ending.' }
+        '415': { description: Not JSON. }
+
+  /dash/boxes/{box}/release:
+    post:
+      tags: [dashboard]
+      summary: Release a dead box's name
+      description: |
+        Removes the MAC binding and the enrolled token for that name, its heartbeat record and
+        its unpicked commands, so the next new box can take the name. Agent key overrides for
+        the name are kept. Same guards as the other dashboard POSTs.
+      parameters:
+        - { name: box, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Released. `revoked` is true when an enrolled token was removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  released: { type: string }
+                  revoked: { type: boolean }
+        '404': { description: 'The name is neither enrolled nor has a heartbeat record.' }
+        '409': { description: 'The box sent a heartbeat in the last 5 minutes.' }
+
+  /dash/requests/{id}:
+    post:
+      tags: [dashboard]
+      summary: Approve or decline an extend request
+      description: Approve queues an `extend` with the given minutes (default 5).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approve]
+              properties:
+                approve: { type: boolean }
+                minutes: { type: integer, minimum: 1, maximum: 60 }
+      responses:
+        '200':
+          description: Decided. `command_id` is set when approved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandQueued' }
+        '400': { description: 'minutes out of range.' }
+        '404': { description: 'Unknown request.' }
+        '409': { description: 'Already decided, or the session is no longer on that box.' }
+
+  /dash/sessions/{id}/download:
+    get:
+      tags: [dashboard]
+      summary: Staff download of any session (same zip as the attendee gets, never expires)
+      parameters: [ { $ref: '#/components/parameters/SessionID' } ]
+      responses:
+        '200':
+          description: Zip stream.
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '404': { description: 'No archive for that session.' }
+
+  /dash/fundings.csv:
+    get:
+      tags: [dashboard]
+      summary: Every faucet transfer as CSV (staff export)
+      description: |
+        Newest first. Columns: created_at (RFC 3339 UTC), box, session_id, attendee, email,
+        telegram, wallet, amount_og, status, counted (yes/no), tx_hash, tx_url, detail.
+        Cells starting with = + - @ get a leading apostrophe. Same guards as /dash/*.
+      responses:
+        '200': { description: 'CSV attachment fundings.csv.', content: { text/csv: { schema: { type: string } } } }
+        '403': { description: 'Called from a hack-box address.' }
+        '404': { description: 'Came through the tunnel.' }
+
+  /dash/rewards.csv:
+    get:
+      tags: [dashboard]
+      summary: Every 0G Pay reward claim as CSV (staff export)
+      description: |
+        Newest first. Columns: created_at (RFC 3339 UTC), box, session_id, attendee, email,
+        telegram, wallet, amount_usd, outcome, credited (yes/no), detail. Same CSV rules and
+        guards as /dash/fundings.csv.
+      responses:
+        '200': { description: 'CSV attachment rewards.csv.', content: { text/csv: { schema: { type: string } } } }
+        '403': { description: 'Called from a hack-box address.' }
+        '404': { description: 'Came through the tunnel.' }
+
+  /dash/config:
+    get:
+      tags: [dashboard]
+      summary: Agent key status per scope (never values)
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashConfig' }
+    post:
+      tags: [dashboard]
+      summary: Set or clear agent keys and the agent choice for a scope
+      description: 'Same guards as the other dashboard POSTs: Content-Type application/json, Origin must match Host. Values are validated before anything is written; errors never quote a value.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DashConfigUpdate' }
+      responses:
+        '200':
+          description: Saved; the new status (same shape as GET).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashConfig' }
+        '400': { description: 'Unknown scope or name, invalid value, a name both set and cleared, or nothing to do.' }
+        '403': { description: Cross-origin request. }
+        '415': { description: Not JSON. }
+
+  /dash/api_test.html:
+    get:
+      tags: [dashboard]
+      summary: The api_test.html page, served same-origin
+      responses:
+        '200': { description: 'HTML.', content: { text/html: {} } }

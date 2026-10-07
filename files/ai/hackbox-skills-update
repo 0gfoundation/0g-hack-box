@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Clone or refresh the 0G agent skills (github.com/0gfoundation/0g-agent-skills, about 1 MB of
+# Markdown: skills, patterns, examples) into /opt/0g-agent-skills, root owned and world
+# readable. The reset hook 50-ai-seed points Claude Code (~/.claude/CLAUDE.md) and OpenCode
+# (~/.config/opencode/AGENTS.md) at it in every fresh home. This is what
+# `curl -fsSL https://build.0g.ai/install | sh` sets up per project, done once per box.
+# Run as root: by setup/65-ai.sh, and by `hackbox skills update`.
+set -euo pipefail
+REPO=${HACKBOX_SKILLS_REPO:-https://github.com/0gfoundation/0g-agent-skills}
+REF=${HACKBOX_SKILLS_REF:-}           # a tag or commit to pin; empty: the default branch
+DIR=/opt/0g-agent-skills
+
+tmp=$(mktemp -d /opt/.0g-agent-skills.XXXXXX)
+trap 'rm -rf "$tmp"' EXIT
+git clone --quiet --depth 1 ${REF:+--branch "$REF"} "$REPO" "$tmp/skills"
+# Swap in the new copy whole, so a reader never sees a half updated tree.
+chmod -R u=rwX,go=rX "$tmp/skills"
+chown -R root:root "$tmp/skills"
+[ -d "$DIR" ] && mv "$DIR" "$tmp/old"
+mv "$tmp/skills" "$DIR"
+echo "0G agent skills: $(git -C "$DIR" log -1 --format='%h %cs') in $DIR"

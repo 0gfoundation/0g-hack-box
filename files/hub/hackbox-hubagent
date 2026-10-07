@@ -1,0 +1,652 @@
+#!/usr/bin/env python3
+"""hack-box hub agent: the only thing on a box that talks to the session hub.
+
+Runs as root under hackbox-hubagent.service. Design and API:
+docs/superpowers/specs/2026-10-01-session-hub-design.md.
+
+- Watches /run/hackbox/state. When a session starts it reads the attendee's
+  name (typed on the welcome screen), registers the session with the hub and
+  writes the download URL, the hub's code and a QR image to /run/hackbox for
+  the overlay. The session never waits for the hub.
+- Every few seconds it sends a heartbeat and runs the commands in the reply.
+  Only two are accepted: extend <1..60> and end. The hub never connects to
+  the box, so a hub compromise can extend or end a session, nothing else.
+- After the reset archived ~/project it uploads the archive. Jobs are files in
+  /var/lib/hackbox/hub/jobs and are retried with backoff, across reboots.
+- Token usage: during a session (at most once a minute, every 15 s on the
+  time-up screen) it copies the attendee's OpenCode database to a root-only
+  temp dir, sums the assistant messages' tokens from the copy (never the live
+  file), deletes the copy and sends the totals with the heartbeat.
+- Agent keys and the offered agents are set on the hub dashboard. When the hub's
+  config_version differs from the one applied here and the box is idle (never
+  during a session), it fetches them, writes them with `hackbox secret set` and
+  `hackbox agents set`, and resets the welcome screen so it shows them.
+
+Without /etc/hackbox/hub.conf it does nothing. Python 3 standard library only.
+Paths are overridable by environment for the tests (HB_*).
+"""
+
+import json
+import os
+import re
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+import urllib.error
+import urllib.request
+import uuid
+
+RUN = os.environ.get("HB_RUN", "/run/hackbox")
+STATE_DIR = os.environ.get("HB_STATE_DIR", "/var/lib/hackbox/hub")
+ARCHIVE_DIR = os.environ.get("HB_ARCHIVE_DIR", "/var/lib/hackbox/archive")
+CONF = os.environ.get("HB_HUB_CONF", "/etc/hackbox/hub.conf")
+NAME_FILE = os.environ.get("HB_NAME_FILE", "/home/hacker/.cache/hackbox/attendee")
+HACKER_UID = int(os.environ.get("HB_HACKER_UID", "2000"))
+HACKBOX = os.environ.get("HB_HACKBOX_CMD", "/usr/local/bin/hackbox")
+ARCHIVE_CMD = os.environ.get("HB_ARCHIVE_CMD", "/usr/local/sbin/hackbox-archive")
+TICK = float(os.environ.get("HB_TICK", "1"))
+BEAT_EVERY = float(os.environ.get("HB_BEAT_EVERY", "3"))
+JOB_BACKOFF_MAX = float(os.environ.get("HB_JOB_BACKOFF_MAX", "300"))
+HUB_BACKOFF_MAX = float(os.environ.get("HB_HUB_BACKOFF_MAX", "30"))
+OPENCODE_DB = os.environ.get("HB_OPENCODE_DB", "/home/hacker/.local/share/opencode/opencode.db")
+USAGE_EVERY = float(os.environ.get("HB_USAGE_EVERY", "60"))
+USAGE_ENDING_EVERY = float(os.environ.get("HB_USAGE_ENDING_EVERY", "15"))
+USAGE_MAX_BYTES = int(os.environ.get("HB_USAGE_MAX_BYTES", str(512 << 20)))
+USAGE_TMP = os.environ.get("HB_USAGE_TMP") or None     # parent of the temp copy; None = system temp
+JOBS = os.path.join(STATE_DIR, "jobs")
+CURRENT = os.path.join(STATE_DIR, "current.json")
+APPLIED = os.path.join(STATE_DIR, "config-applied")
+SECRET_NAMES = ("anthropic-api-key", "0g-router-key")
+AGENT_NAMES = ("claude", "claude-0g", "opencode")
+
+# Activity for the dashboard: which programs the attendee runs, as friendly names from this
+# list only (process names, never window titles, URLs, files or screenshots). The welcome
+# screen tells the attendee. Keys are process names as ps shows them (15 characters).
+APPS = {
+    "gnome-terminal-": "Terminal", "gnome-terminal": "Terminal", "xterm": "Terminal",
+    "opencode": "OpenCode", "claude": "Claude Code",
+    "chromium": "Chromium", "chrome": "Chromium", "firefox": "Firefox",
+    "nemo": "Files", "xed": "Text editor", "gedit": "Text editor", "code": "VS Code",
+    "node": "node", "npm": "npm", "npx": "npm", "pnpm": "pnpm", "bun": "bun",
+    "python3": "python", "python": "python", "pip": "pip", "go": "go", "cargo": "cargo",
+    "forge": "foundry", "anvil": "foundry", "git": "git", "docker": "docker",
+}
+
+
+def log(msg):
+    print("hackbox-hubagent: " + msg, file=sys.stderr, flush=True)
+
+
+# ------------------------------------------------------------------ files ---
+
+def read_run(name):
+    try:
+        with open(os.path.join(RUN, name), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def put_run(name, data):
+    """Atomic, root-owned, world-readable (the overlay reads these)."""
+    path = os.path.join(RUN, name)
+    tmp = os.path.join(RUN, "." + name + ".hubtmp")
+    mode = "wb" if isinstance(data, bytes) else "w"
+    with open(tmp, mode) as f:
+        f.write(data if isinstance(data, bytes) else data + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def rm_run(name):
+    try:
+        os.unlink(os.path.join(RUN, name))
+    except OSError:
+        pass
+
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def load_conf():
+    """HUB_URL and HUB_TOKEN from a root-only shell-style file."""
+    try:
+        st = os.stat(CONF)
+        text = open(CONF, encoding="utf-8").read()
+    except OSError:
+        return None
+    if os.environ.get("HB_SKIP_PERM_CHECK") != "1" and (st.st_uid != 0 or st.st_mode & 0o077):
+        log("%s must be owned by root and not readable by others; ignoring it" % CONF)
+        return None
+    conf = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*(HUB_URL|HUB_TOKEN)=(['\"]?)(.*)\2\s*$", line)
+        if m:
+            conf[m.group(1)] = m.group(3)
+    if not conf.get("HUB_URL") or not conf.get("HUB_TOKEN"):
+        return None
+    conf["HUB_URL"] = conf["HUB_URL"].rstrip("/")
+    return conf
+
+
+def clean_name(raw):
+    """Printable, single spaced, at most 40 characters."""
+    text = "".join(ch for ch in raw if unicodedata.category(ch)[0] != "C")
+    text = " ".join(text.split())
+    return text[:40].strip()
+
+
+def read_attendee():
+    """The attendee's own file (name, agent id, email, telegram). Read as root, so:
+    no symlinks, a regular file owned by the attendee, small."""
+    try:
+        fd = os.open(NAME_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return "", "", "", ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != HACKER_UID or st.st_size > 512:
+            return "", "", "", ""
+        raw = os.read(fd, 512).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+    lines = raw.split("\n")
+    name = clean_name(lines[0]) if lines else ""
+    agent = re.sub(r"[^a-z0-9_-]", "", lines[1].lower())[:30] if len(lines) > 1 else ""
+    email = lines[2].strip()[:120] if len(lines) > 2 else ""
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        email = ""
+    telegram = lines[3].strip().lstrip("@") if len(lines) > 3 else ""
+    telegram = "@" + telegram if re.fullmatch(r"[A-Za-z0-9_]{5,32}", telegram) else ""
+    return name, agent, email, telegram
+
+
+# ------------------------------------------------------------------ usage ---
+
+USAGE_KEYS = ("input", "output", "reasoning", "cache_read", "cache_write", "replies")
+
+
+def _count(v):
+    """A token count from the attendee's data: a non-negative int, anything else is 0."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 15 else 0
+
+
+def _copy_attendee_file(src, dst):
+    """Copy one of the attendee's files without following a symlink at the end, and only a
+    regular file the attendee owns, at most USAGE_MAX_BYTES. False when there is none."""
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != HACKER_UID or st.st_size > USAGE_MAX_BYTES:
+            return False
+        left = USAGE_MAX_BYTES
+        with open(dst, "wb") as out:
+            while left > 0:
+                chunk = os.read(fd, min(1 << 20, left))
+                if not chunk:
+                    break
+                out.write(chunk)
+                left -= len(chunk)
+        return True
+    finally:
+        os.close(fd)
+
+
+def read_usage():
+    """Token totals of the attendee's OpenCode sessions, summed like hub/deploy/token-usage.sh:
+    {"input", "output", "reasoning", "cache_read", "cache_write", "replies", "models": {id: n}}
+    (n = input + output + reasoning of that model). Works on a copy; never raises: None
+    when there is no database or anything goes wrong."""
+    tmp = None
+    try:
+        tmp = tempfile.mkdtemp(prefix="hb-usage-", dir=USAGE_TMP)   # 0700, root's
+        copy = os.path.join(tmp, "opencode.db")
+        if not _copy_attendee_file(OPENCODE_DB, copy):
+            return None
+        for side in ("-wal", "-shm"):
+            if not _copy_attendee_file(OPENCODE_DB + side, copy + side):
+                try:
+                    os.unlink(copy + side)
+                except OSError:
+                    pass
+        tot = dict.fromkeys(USAGE_KEYS, 0)
+        models = {}
+        db = sqlite3.connect(copy, timeout=1)
+        try:
+            db.execute("PRAGMA trusted_schema = OFF")
+            deadline = time.time() + 20
+            db.set_progress_handler(lambda: 1 if time.time() > deadline else 0, 10000)
+            for (d,) in db.execute("select data from message"):
+                try:
+                    r = json.loads(d)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(r, dict) or r.get("role") != "assistant":
+                    continue
+                k = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
+                c = k.get("cache") if isinstance(k.get("cache"), dict) else {}
+                i, o, rs = _count(k.get("input")), _count(k.get("output")), _count(k.get("reasoning"))
+                tot["input"] += i
+                tot["output"] += o
+                tot["reasoning"] += rs
+                tot["cache_read"] += _count(c.get("read"))
+                tot["cache_write"] += _count(c.get("write"))
+                tot["replies"] += 1
+                m = r.get("modelID")
+                m = m[:80] if isinstance(m, str) and m else "?"
+                if m in models or len(models) < 20:
+                    models[m] = models.get(m, 0) + i + o + rs
+        finally:
+            db.close()
+        tot["models"] = models
+        return tot
+    except Exception:   # noqa: BLE001 (metrics only: never break the agent)
+        return None
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ------------------------------------------------------------------- http ---
+
+class Hub:
+    def __init__(self, conf):
+        self.url = conf["HUB_URL"]
+        self.token = conf["HUB_TOKEN"]
+
+    def call(self, method, path, body=None, raw=None, length=None, timeout=5):
+        headers = {"Authorization": "Bearer " + self.token}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        elif raw is not None:
+            data = raw
+            headers["Content-Type"] = "application/gzip"
+            headers["Content-Length"] = str(length)
+        req = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            payload = r.read()
+            if r.headers.get("Content-Type", "").startswith("application/json"):
+                return json.loads(payload or b"{}")
+            return payload
+
+
+# ------------------------------------------------------------------ agent ---
+
+class Agent:
+    def __init__(self):
+        self.last_state = None
+        self.last_beat = 0
+        self.cur = load_json(CURRENT)
+        self.job_wait = {}
+        self.hub_fails = 0
+        self.hub_pause = 0
+        self.usage_at = 0
+        self.status = {"hub": "unconfigured", "last_ok": 0, "last_error": "", "jobs": 0}
+        try:
+            self.applied = open(APPLIED, encoding="utf-8").read().strip()
+        except OSError:
+            self.applied = ""
+
+    # -- session lifecycle (local, never waits for the hub) --
+
+    def on_state(self, state):
+        if state == "active" and (self.cur is None or self.cur.get("closed_at")):
+            name, agent, email, telegram = read_attendee()
+            end = read_run("session-end")
+            now = int(time.time())
+            minutes = (int(end) - now + 59) // 60 if end and end.isdigit() else 0
+            self.cur = {"local_id": uuid.uuid4().hex, "name": name, "agent": agent,
+                        "email": email, "telegram": telegram,
+                        "minutes": minutes, "started_at": now, "session_id": None,
+                        "url": None, "code": None, "local_code": None, "closed_at": None,
+                        "reason": None}
+            save_json(CURRENT, self.cur)
+            self.usage_at = 0
+            if name:
+                put_run("attendee", name)
+            log("session started (%s)" % (name or "no name"))
+        if self.cur and not self.cur.get("closed_at"):
+            if state == "ending" and self.last_state != "ending":
+                self.usage_at = 0            # fresh totals on the time-up screen
+            if state == "ending" and not self.cur.get("reason"):
+                end = read_run("session-end")
+                left = int(end) - int(time.time()) if end and end.isdigit() else 0
+                self.cur["reason"] = "time_up" if left <= 3 else "ended_early"
+                save_json(CURRENT, self.cur)
+            code = read_run("code")
+            if code and state in ("ending", "resetting") and self.cur.get("local_code") != code:
+                self.cur["local_code"] = code
+                save_json(CURRENT, self.cur)
+            if state == "idle" and self.last_state in ("active", "ending", "resetting"):
+                self.close_session()
+            elif state == "idle" and self.last_state is None:
+                # Agent restarted after the session ended (or the box rebooted).
+                self.close_session()
+        self.last_state = state
+
+    def close_session(self):
+        cur = self.cur
+        cur["closed_at"] = int(time.time())
+        cur["reason"] = cur.get("reason") or "reset"
+        save_json(CURRENT, cur)
+        job = dict(cur)
+        job["archive"] = self.match_archive(cur)
+        save_json(os.path.join(JOBS, cur["local_id"] + ".json"), job)
+        log("session closed (%s), archive %s" % (cur["reason"], job["archive"] or "none"))
+
+    def match_archive(self, cur):
+        """The reset writes 'last-archive <code|none|failed> <epoch>' after it
+        archived. Use it only if it belongs to this session."""
+        info = (read_run("last-archive") or "").split()
+        if len(info) == 2 and info[1].isdigit() and int(info[1]) >= cur["started_at"]:
+            if info[0] not in ("none", "failed"):
+                return info[0]
+            return None
+        if cur.get("local_code") and os.path.exists(self.archive_path(cur["local_code"])):
+            return cur["local_code"]
+        return None
+
+    @staticmethod
+    def archive_path(code):
+        return os.path.join(ARCHIVE_DIR, code + ".tar.gz")
+
+    def sample_usage(self, state):
+        """Refresh the live session's token totals when due. Only while active or on the
+        time-up screen: the reset unmounts the home, so never hold its files then."""
+        live = self.cur if self.cur and not self.cur.get("closed_at") else None
+        if not live or state not in ("active", "ending"):
+            return
+        every = USAGE_ENDING_EVERY if state == "ending" else USAGE_EVERY
+        if time.time() - self.usage_at < every:
+            return
+        self.usage_at = time.time()
+        if (read_run("state") or "idle") != state:
+            return
+        usage = read_usage()
+        if usage is not None and usage != live.get("usage"):
+            live["usage"] = usage
+            try:
+                save_json(CURRENT, live)
+            except OSError:
+                pass
+
+    # -- talking to the hub --
+
+    def register(self, hub, rec):
+        r = hub.call("POST", "/api/v1/sessions", {
+            "name": rec["name"], "agent": rec["agent"], "email": rec.get("email", ""),
+            "telegram": rec.get("telegram", ""),
+            "minutes": rec["minutes"],
+            "started_at": rec["started_at"], "local_code": rec.get("local_code") or ""})
+        rec["session_id"], rec["url"], rec["code"] = r["id"], r["url"], r["code"]
+        return rec
+
+    def publish_links(self, hub):
+        put_run("hub-url", self.cur["url"])
+        put_run("hub-code", self.cur["code"])
+        try:
+            put_run("qr.png", hub.call("GET", "/api/v1/sessions/%s/qr.png" % self.cur["session_id"]))
+        except (OSError, urllib.error.URLError, ValueError) as e:
+            log("qr fetch failed: %s" % e)
+
+    @staticmethod
+    def activity(state):
+        if state != "active":
+            return []
+        try:
+            out = subprocess.run(["ps", "-u", str(HACKER_UID), "-o", "comm="],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        seen = []
+        for comm in out.split():
+            app = APPS.get(comm)
+            if app and app not in seen:
+                seen.append(app)
+        return seen[:12]
+
+    def heartbeat(self, hub, state):
+        status = {}
+        try:
+            out = subprocess.run([HACKBOX, "status", "--json"], capture_output=True, text=True,
+                                 timeout=10).stdout
+            status = json.loads(out) if out.strip() else {}
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        live = self.cur if self.cur and not self.cur.get("closed_at") else None
+        req = read_run("extend-request")
+        end = read_run("session-end")
+        left = max(0, int(end) - int(time.time())) if state == "active" and end and end.isdigit() else 0
+        body = {
+            "session_id": live["session_id"] if live else None, "state": state,
+            "seconds_left": left,
+            "extend_request_at": int(req) if req and req.isdigit() and live else 0,
+            "applied_config_version": self.applied,
+            "activity": self.activity(state),
+            "status": status}
+        if live and live.get("session_id") and isinstance(live.get("usage"), dict):
+            body["usage"] = live["usage"]
+        reply = hub.call("POST", "/api/v1/heartbeat", body)
+        for cmd in reply.get("commands") or []:
+            self.run_command(hub, cmd)
+        ext = reply.get("extend") or {}
+        st = ext.get("status")
+        if live and req and st in ("approved", "declined"):
+            rm_run("extend-request")
+            put_run("extend-status", "%s %s" % (st, ext.get("minutes") or 0))
+            log("extend request %s" % st)
+        want = reply.get("config_version")
+        if isinstance(want, str) and want != self.applied and state == "idle":
+            self.apply_config(hub)
+
+    def apply_config(self, hub):
+        """Keys and agents from the dashboard, between sessions only. A failed
+        step leaves the version unapplied, so the next heartbeat tries again."""
+        cfg = hub.call("GET", "/api/v1/config")
+        secrets = cfg.get("secrets") or {}
+        for name in SECRET_NAMES:
+            value = secrets.get(name)
+            if not isinstance(value, str) or not value:
+                continue
+            r = subprocess.run([HACKBOX, "secret", "set", name], input=value + "\n",
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                raise ValueError("secret set %s failed: %s" % (name, r.stderr.strip()[-200:]))
+        agents = [a for a in (cfg.get("agents") or []) if a in AGENT_NAMES]
+        if agents:
+            r = subprocess.run([HACKBOX, "agents", "set"] + agents, capture_output=True,
+                               text=True, timeout=60)
+            if r.returncode != 0:
+                raise ValueError("agents set failed: %s" % (r.stdout + r.stderr).strip()[-200:])
+        # The welcome screen only shows a new agent selection after a reset.
+        if (read_run("state") or "idle") == "idle":
+            subprocess.run([HACKBOX, "reset"], capture_output=True, text=True, timeout=120)
+        self.applied = cfg.get("version") or ""
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        with open(APPLIED, "w", encoding="utf-8") as f:
+            f.write(self.applied + "\n")
+        log("applied hub config %s (%s; agents %s)" % (
+            self.applied, ", ".join(n for n in SECRET_NAMES if secrets.get(n)) or "no keys",
+            " ".join(agents) or "unchanged"))
+
+    def run_command(self, hub, cmd):
+        op, cid = cmd.get("op"), cmd.get("id")
+        minutes = cmd.get("minutes")
+        if op == "extend" and isinstance(minutes, int) and 1 <= minutes <= 60:
+            argv = [HACKBOX, "extend", str(minutes)]
+        elif op == "end":
+            argv = [HACKBOX, "end"]
+        elif op == "done":
+            # Staff closes the time-up screen: the same flag as the attendee's Done button.
+            if (read_run("state") or "") == "ending":
+                put_run("ending-done", "1")
+                ok, msg = True, "time-up screen closed"
+            else:
+                ok, msg = False, "not on the time-up screen"
+            argv = None
+        else:
+            ok, msg = False, "refused: unknown or out of range command"
+            log("%s %r" % (msg, cmd))
+            argv = None
+        if argv:
+            try:
+                r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                ok, msg = r.returncode == 0, (r.stdout + r.stderr).strip()[-300:]
+            except (OSError, subprocess.SubprocessError) as e:
+                ok, msg = False, str(e)
+            log("command %s %s: %s" % (op, minutes or "", "ok" if ok else msg))
+        try:
+            hub.call("POST", "/api/v1/commands/%s/result" % cid, {"ok": ok, "message": msg})
+        except (OSError, urllib.error.URLError, ValueError) as e:
+            log("command result not delivered: %s" % e)
+
+    def run_jobs(self, hub):
+        try:
+            names = sorted(n for n in os.listdir(JOBS) if n.endswith(".json"))
+        except OSError:
+            names = []
+        self.status["jobs"] = len(names)
+        now = time.time()
+        for n in names:
+            path = os.path.join(JOBS, n)
+            if self.job_wait.get(n, (0, 0))[0] > now:
+                continue
+            job = load_json(path)
+            if not job:
+                os.unlink(path)
+                continue
+            try:
+                self.finish_job(hub, job, path)
+                os.unlink(path)
+                self.job_wait.pop(n, None)
+                log("uploaded session %s (%s)" % (job["session_id"], job.get("archive") or "empty"))
+            except (OSError, urllib.error.URLError, ValueError, KeyError) as e:
+                tries = self.job_wait.get(n, (0, 0))[1] + 1
+                self.job_wait[n] = (now + min(JOB_BACKOFF_MAX, 5 * 2 ** min(tries, 6)), tries)
+                self.status["last_error"] = "job %s: %s" % (n, e)
+                log("job %s failed (try %d): %s" % (n, tries, e))
+
+    def finish_job(self, hub, job, path):
+        if not job.get("session_id"):
+            self.register(hub, job)
+            save_json(path, job)
+        code = job.get("archive")
+        empty = not code or not os.path.exists(self.archive_path(code))
+        if not empty:
+            size = os.path.getsize(self.archive_path(code))
+            with open(self.archive_path(code), "rb") as f:
+                hub.call("PUT", "/api/v1/sessions/%s/archive" % job["session_id"], raw=f,
+                         length=size, timeout=600)
+        end = {"ended_at": job["closed_at"], "reason": job.get("reason") or "reset", "empty": empty}
+        if isinstance(job.get("usage"), dict):
+            end["usage"] = job["usage"]      # the last totals, also when no heartbeat carried them
+        hub.call("POST", "/api/v1/sessions/%s/end" % job["session_id"], end)
+
+    # -- main loop --
+
+    def early_upload(self, hub, live):
+        """On the time-up screen, before Done: archive ~/project now and upload it, so the
+        download link works while the attendee is still looking at the QR code. The reset
+        archives again after Done (same code, files closed) and the upload job replaces
+        this copy with that one. Tolerates files changing while read (hackbox-archive)."""
+        code = read_run("code")
+        live["early_upload"] = True          # once per session, also when it fails
+        save_json(CURRENT, live)
+        if not code:
+            # Nothing new in ~/project: say so now, or the download page shows Preparing until
+            # Done. The upload job after the reset posts the same end again (idempotent).
+            hub.call("POST", "/api/v1/sessions/%s/end" % live["session_id"], {
+                "ended_at": int(time.time()), "reason": live.get("reason") or "ended_early",
+                "empty": True})
+            log("session %s ended with nothing to save (told the hub early)" % live["session_id"])
+            return
+        r = subprocess.run([ARCHIVE_CMD, "create", code], capture_output=True, text=True,
+                           timeout=120)
+        path = self.archive_path(code)
+        if r.returncode != 0 or not os.path.exists(path):
+            log("early archive %s failed: %s" % (code, (r.stderr or r.stdout).strip()[-200:]))
+            return
+        with open(path, "rb") as f:
+            hub.call("PUT", "/api/v1/sessions/%s/archive" % live["session_id"], raw=f,
+                     length=os.path.getsize(path), timeout=600)
+        log("early upload of %s for session %s" % (code, live["session_id"]))
+
+    def step(self):
+        conf = load_conf()
+        state = read_run("state") or "idle"
+        self.on_state(state)
+        if conf is None:
+            self.status["hub"] = "unconfigured"
+            return
+        self.sample_usage(state)
+        if time.time() < self.hub_pause:
+            return
+        hub = Hub(conf)
+        try:
+            live = self.cur if self.cur and not self.cur.get("closed_at") else None
+            if live and not live.get("session_id"):
+                self.register(hub, live)
+                save_json(CURRENT, live)
+                self.publish_links(hub)
+                log("session registered: %s" % live["url"])
+            if live and live.get("session_id") and state == "ending" and not live.get("early_upload"):
+                self.early_upload(hub, live)
+            if time.time() - self.last_beat >= BEAT_EVERY:
+                self.last_beat = time.time()
+                self.heartbeat(hub, state)
+                self.status.update(hub="online", last_ok=int(time.time()))
+            self.run_jobs(hub)
+            self.hub_fails = 0
+        except (OSError, urllib.error.URLError, ValueError, KeyError) as e:
+            # Back off (3 s up to 30 s) so a dead hub does not slow the state tracking.
+            self.hub_fails += 1
+            self.hub_pause = time.time() + min(HUB_BACKOFF_MAX, 3 * self.hub_fails)
+            self.status.update(hub="unreachable", last_error=str(e)[:200])
+        finally:
+            try:
+                put_run("hub-status", json.dumps(self.status))
+            except OSError:
+                pass
+
+
+def main():
+    os.makedirs(JOBS, mode=0o700, exist_ok=True)
+    agent = Agent()
+    log("started, hub config %s" % ("found" if load_conf() else "missing"))
+    once = "--once" in sys.argv
+    while True:
+        try:
+            agent.step()
+        except Exception as e:  # the agent must never die on a surprise
+            log("unexpected error: %r" % e)
+        if once:
+            return 0
+        time.sleep(TICK)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

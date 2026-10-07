@@ -1,0 +1,483 @@
+#!/usr/bin/env bash
+# Regenerate everything that decides which agents a box offers and how they authenticate,
+# from /etc/hackbox/conf.d and the secrets present. No reinstall: switching combinations
+# only rewrites these files.
+#   /etc/claude-code/managed-settings.json   Claude Code managed policy (top precedence)
+#   /etc/opencode/opencode.json              OpenCode managed config (top precedence)
+#   /etc/hackbox/agents.json                 manifest read by the welcome overlay
+#   /etc/hackbox/agents.selected             the saved selection, one line
+#   /etc/hackbox/ai/launch.env               what hackbox-agent needs (no secrets)
+# Secrets never go into these files. They stay in /etc/hackbox/secrets/ and are read at
+# run time by the apiKeyHelper script or by hackbox-agent (which exports them), and by the
+# seed hook into the attendee's own environment file.
+#
+# Usage (as root, normally through `hackbox agents`):
+#   hackbox-ai-render set <agent>...   write configs for this selection
+#   hackbox-ai-render current          rewrite for the saved selection, else AGENTS_DEFAULT
+#   hackbox-ai-render show             print the selection and per-agent readiness
+# HB_ROOT=/tmp/x prefixes every path, for dry runs and tests off the box.
+set -euo pipefail
+
+ROOT=${HB_ROOT:-}
+if [ -z "$ROOT" ] && [ "$(id -u)" -ne 0 ]; then
+  echo "hackbox-ai-render: run as root (the admin CLI does this: hackbox agents ...)" >&2
+  exit 1
+fi
+
+set -a
+for f in "$ROOT"/etc/hackbox/conf.d/*.conf; do
+  [ -r "$f" ] && . "$f"
+done
+set +a
+export HB_ROOT="$ROOT"
+
+exec python3 - "$@" <<'PY'
+import json, os, sys, tempfile, time
+
+E = os.environ.get
+ROOT = E("HB_ROOT", "")
+KNOWN = ("claude", "claude-0g", "opencode")
+SECRETS_DIR = "/etc/hackbox/secrets"
+KEY_HELPER = "/usr/local/lib/hackbox/ai/key"
+LAUNCHER = "/usr/local/bin/hackbox-agent"
+LABELS = {"claude": "Claude Code", "claude-0g": "Claude Code", "opencode": "OpenCode"}
+
+
+def die(msg, code=2):
+    print("hackbox agents: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def p(path):
+    return ROOT + path
+
+
+def words(name, default=""):
+    return (E(name) or default).split()
+
+
+def val(name, default=""):
+    v = E(name)
+    return v if v not in (None, "") else default
+
+
+def router_base():
+    # The Anthropic path wants the bare host (the client appends /v1/messages); the
+    # OpenAI path wants .../v1. Accept either spelling in OG_ROUTER_URL.
+    u = val("OG_ROUTER_URL", "https://router-api.0g.ai").rstrip("/")
+    if u.endswith("/v1"):
+        u = u[:-3]
+    return u
+
+
+def claude_auth():
+    a = val("CLAUDE_AUTH", "apikey")
+    if a not in ("apikey", "gateway", "subscription"):
+        die("CLAUDE_AUTH must be apikey, gateway or subscription (got %r)" % a)
+    return a
+
+
+def requirement(agent):
+    """(secret name, config problem or None) for one agent."""
+    if agent == "claude":
+        a = claude_auth()
+        if a == "apikey":
+            return "anthropic-api-key", None
+        if a == "gateway":
+            gw = val("ANTHROPIC_BASE_URL_OVERRIDE") or val("CLAUDE_GATEWAY_URL")
+            return "claude-gateway-token", (None if gw else "CLAUDE_GATEWAY_URL")
+        return "claude-oauth-token", None
+    if agent in ("claude-0g", "opencode"):
+        return "0g-router-key", (None if val("OG_ROUTER_URL") else "OG_ROUTER_URL")
+    die("unknown agent %r" % agent)
+
+
+def secret_present(name):
+    f = p(SECRETS_DIR + "/" + name)
+    try:
+        return os.path.isfile(f) and os.path.getsize(f) > 0
+    except OSError:
+        return False
+
+
+def status(agent):
+    secret, problem = requirement(agent)
+    if problem:
+        return "missing config: " + problem
+    if not secret_present(secret):
+        return "missing secret: " + secret
+    return "ready"
+
+
+def parse_selection(tokens):
+    sel = []
+    for t in tokens:
+        for a in t.replace(",", " ").split():
+            if a == "default":
+                for d in words("AGENTS_DEFAULT", "claude opencode"):
+                    if d not in sel:
+                        sel.append(d)
+                continue
+            if a not in KNOWN:
+                die("unknown agent %r (choose from: %s)" % (a, ", ".join(KNOWN)))
+            if a not in sel:
+                sel.append(a)
+    if not sel:
+        die("give at least one agent: claude, claude-0g, opencode")
+    if "claude" in sel and "claude-0g" in sel:
+        die("claude and claude-0g both run Claude Code with one box-wide policy, so only "
+            "one of them can be offered. Pick claude (Anthropic) or claude-0g (0G Compute).")
+    return sel
+
+
+def saved_selection():
+    try:
+        with open(p("/etc/hackbox/agents.selected")) as fh:
+            s = fh.read().split()
+        return s or None
+    except OSError:
+        return None
+
+
+# Claude Code managed settings
+
+def claude_settings(sel):
+    env = {
+        # documented: skips onboarding and hides account details in the header and /status
+        "IS_DEMO": "1",
+        "DISABLE_UPDATES": "1",
+        "DISABLE_AUTOUPDATER": "1",
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "DISABLE_FEEDBACK_COMMAND": "1",
+        "DISABLE_LOGIN_COMMAND": "1",
+        "DISABLE_LOGOUT_COMMAND": "1",
+        # always hidden; essential on the subscription route (/usage-credits buys usage)
+        "DISABLE_EXTRA_USAGE_COMMAND": "1",
+    }
+    s = {
+        "permissions": {
+            "defaultMode": "acceptEdits",
+            "disableBypassPermissionsMode": "disable",
+            "deny": [
+                "Bash(sudo *)",
+                "Bash(su *)",
+                "Bash(pkexec *)",
+                # speed bumps only: a shell command can still read what the helper reads
+                "Read(//etc/hackbox/secrets/**)",
+                "Read(//etc/claude-code/**)",
+            ],
+        },
+        "maxEffortLevel": val("CLAUDE_MAX_EFFORT", "high"),
+        "allowManagedHooksOnly": True,
+        "allowedMcpServers": [],
+        "allowManagedMcpServersOnly": True,
+        "disableClaudeAiConnectors": True,
+        "strictKnownMarketplaces": [],
+        "disableSideloadFlags": True,
+        "disableRemoteControl": True,
+        "autoContinueAtUsageLimit": False,
+        "cleanupPeriodDays": 1,
+        "companyAnnouncements": [val("AI_ANNOUNCEMENT",
+                                     "Welcome to the 0G hacker zone. This machine is wiped after your slot.")],
+        "env": env,
+    }
+
+    if "claude-0g" in sel:
+        og, small = val("OG_MODEL", "glm-5.3"), val("OG_SMALL_MODEL", "0gm-1.0-35b-a3b")
+        # Follows 0G's Claude Code guide (0g-doc router/clients/claude-code.md), with the
+        # key coming from apiKeyHelper (sent as x-api-key and Bearer, both accepted by the
+        # Router) instead of ANTHROPIC_AUTH_TOKEN, so it is not in this world-readable file.
+        env.update({
+            "ANTHROPIC_BASE_URL": router_base(),
+            "ANTHROPIC_MODEL": og,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": og,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": og,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": small,
+            "CLAUDE_CODE_SUBAGENT_MODEL": og,
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": val("OG_CONTEXT_TOKENS", "983616"),
+        })
+        s["apiKeyHelper"] = KEY_HELPER + " 0g-router-key"
+        s["modelOverrides"] = {i: small for i in words("OG_SONNET_IDS", "claude-sonnet-5")}
+        s["modelPicker"] = {
+            "replaceBuiltInOptions": True,
+            "options": [
+                {"model": og, "label": og + " (0G Compute)", "description": "Default"},
+                {"model": small, "label": small + " (0G Compute)", "description": "Fast and cheap"},
+            ],
+        }
+        # No availableModels here: the allowlist matches Claude ids, and the Router key's
+        # allowed_models is the real limit for this agent.
+    elif "claude" in sel:
+        s["model"] = val("CLAUDE_DEFAULT_MODEL", "sonnet")
+        s["availableModels"] = words("CLAUDE_MODELS", "sonnet haiku")
+        s["enforceAvailableModels"] = True
+        a = claude_auth()
+        override = val("ANTHROPIC_BASE_URL_OVERRIDE")
+        if a == "apikey":
+            s["apiKeyHelper"] = KEY_HELPER + " anthropic-api-key"
+            if override:
+                env["ANTHROPIC_BASE_URL"] = override
+        elif a == "gateway":
+            # Gateway token through apiKeyHelper (sent as Authorization: Bearer and
+            # x-api-key), not ANTHROPIC_AUTH_TOKEN in this world-readable file.
+            env["ANTHROPIC_BASE_URL"] = override or val("CLAUDE_GATEWAY_URL")
+            s["apiKeyHelper"] = KEY_HELPER + " claude-gateway-token"
+        else:
+            # subscription: hackbox-agent exports CLAUDE_CODE_OAUTH_TOKEN at launch.
+            # forceLoginMethod stays unset on every route.
+            if override:
+                env["ANTHROPIC_BASE_URL"] = override
+        # never let a stray ANTHROPIC_BASE_URL empty string reach the client
+        if env.get("ANTHROPIC_BASE_URL") == "":
+            del env["ANTHROPIC_BASE_URL"]
+    else:
+        # Claude Code is installed but not offered: keep the policy, add no credentials.
+        s["model"] = val("CLAUDE_DEFAULT_MODEL", "sonnet")
+        s["availableModels"] = words("CLAUDE_MODELS", "sonnet haiku")
+        s["enforceAvailableModels"] = True
+    return s
+
+
+# OpenCode managed config
+
+MODEL_META = {
+    "glm-5.3": {"name": "GLM-5.3 (0G Compute)", "tool_call": True, "reasoning": True,
+                "temperature": True, "interleaved": {"field": "reasoning_content"},
+                "limit": {"context": 200000, "output": 32768}},
+    "kimi-k2.7-code": {"name": "Kimi K2.7 Code (0G Compute)", "tool_call": True,
+                       "reasoning": True, "temperature": False, "attachment": True,
+                       "modalities": {"input": ["text", "image"], "output": ["text"]},
+                       "interleaved": {"field": "reasoning_content"},
+                       "limit": {"context": 200000, "output": 16384}},
+    "0gm-1.0-35b-a3b": {"name": "0GM 1.0 35B-A3B (0G in-house)", "tool_call": True,
+                        "reasoning": True, "temperature": True,
+                        "interleaved": {"field": "reasoning_content"},
+                        "limit": {"context": 200000, "output": 32768}},
+}
+
+
+def model_meta(mid):
+    m = MODEL_META.get(mid)
+    if m:
+        return json.loads(json.dumps(m))
+    return {"name": mid + " (0G Compute)", "tool_call": True,
+            "limit": {"context": 200000, "output": 16384}}
+
+
+def opencode_config():
+    og = val("OG_MODEL", "glm-5.3")
+    small = val("OG_SMALL_MODEL", "0gm-1.0-35b-a3b")
+    fallback = val("OG_FALLBACK_MODEL", "kimi-k2.7-code")
+    models = {}
+    for mid in (og, fallback, small):
+        if mid and mid not in models:
+            models[mid] = model_meta(mid)
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "autoupdate": False,
+        "share": "disabled",
+        "enabled_providers": ["0g"],
+        "model": "0g/" + og,
+        "small_model": "0g/" + small,
+        "default_agent": "build",
+        "provider": {
+            "0g": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "0G Compute",
+                "options": {
+                    "baseURL": router_base() + "/v1",
+                    # {env:} rather than {file:}: a missing or unreadable key file makes
+                    # OpenCode reject the whole config and refuse to start (tested on
+                    # 1.18.33), for the admin too. An unset variable only fails the
+                    # request. hackbox-agent exports it from the secret; the seed hook's
+                    # ~/.config/hackbox/env exports it for every attendee shell.
+                    "apiKey": "{env:ZG_ROUTER_API_KEY}",
+                    "headers": {"X-0G-Provider-Sort": "latency"},
+                    "timeout": 600000,
+                    "chunkTimeout": 120000,
+                },
+                "models": models,
+            }
+        },
+        # Auto mode: edits and shell commands run without asking (the attendee account has
+        # no sudo and the home is wiped after every session). Privilege tools stay denied,
+        # and a repeating loop still asks, so a runaway agent cannot burn the credit.
+        "permission": {
+            "edit": "allow",
+            "webfetch": "allow",
+            "bash": {
+                "*": "allow",
+                "sudo *": "deny", "su *": "deny", "pkexec *": "deny",
+            },
+            "external_directory": "allow",
+            "doom_loop": "ask",
+        },
+        "compaction": {"auto": True, "prune": True},
+        # Named subagents on the default model, so the build agent can split a dapp into a
+        # contract part and a frontend part and run both at once (AGENTS.md asks it to).
+        "agent": {
+            "contract": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Writes, compiles, tests and deploys Solidity contracts to the 0G "
+                               "Galileo testnet. Creates and funds the deployer wallet with 0g-fund. "
+                               "Returns the deployed address, ABI path and explorer link.",
+                "prompt": "You build and deploy smart contracts on the 0G Galileo testnet. Follow "
+                          "the 0G skills in /opt/0g-agent-skills for chain details and tooling. "
+                          "Keep contracts small and working. Create a deployer wallet, keep the "
+                          "key in the project .env (gitignored), fund it with `0g-fund <address>`, "
+                          "deploy, and write the address and ABI where the frontend reads them. "
+                          "Reply with the address, the ABI path and the explorer link, briefly.",
+            },
+            "frontend": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Builds the web UI (Vite + React or plain HTML), wires it to the "
+                               "deployed contract and to the local mock API, and starts the dev server.",
+                "prompt": "You build the web frontend quickly: Vite + React unless told otherwise, "
+                          "clean and good looking. Read the contract address and ABI from the paths "
+                          "you are given. For outside data (prices, markets, AI or NFT marketplace, "
+                          "news) use the mock API at http://127.0.0.1:4010 and show a visible "
+                          "\"Mock data\" badge where it is used. AI features call real 0G Compute "
+                          "through http://127.0.0.1:4010/ai/chat or /v1/chat/completions (stream). "
+                          "Reply with the URL to open, briefly.",
+            },
+            "designer": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Polishes an existing web UI: layout, typography, colour, motion, "
+                               "loading, empty and error states, responsive design. Use once a "
+                               "first screen exists.",
+                "prompt": "You make an existing web app look and feel great without breaking it. "
+                          "Dark theme with the 0G purple palette unless the app has its own. Improve "
+                          "spacing, hierarchy and typography, add tasteful motion and hover states, "
+                          "skeleton loaders, empty and error states, and make it responsive. Keep "
+                          "every feature working; run the build to check. Reply with what changed, "
+                          "briefly.",
+            },
+            "reviewer": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Runs the app, exercises every flow (build, dev server, API calls, "
+                               "contract calls), and fixes the bugs it finds. Use when the app runs.",
+                "prompt": "You are the QA engineer. Build and run the app, fetch its pages and APIs "
+                          "with curl, read the browser console errors from the dev server output, "
+                          "run the contract tests, and click through each flow in your head against "
+                          "the code. Fix every bug you find directly, rerun to confirm. Reply with "
+                          "the bugs fixed and anything still open, briefly.",
+            },
+            "pitch": {
+                "mode": "subagent",
+                "model": "0g/" + og,
+                "description": "Writes README.md (what, why, how it uses 0G, how to run, contract "
+                               "address and explorer link) and DEMO.md, a 60 second demo script.",
+                "prompt": "You write the project's story for judges. README.md: one line pitch, the "
+                          "problem, what it does, how it uses 0G (chain, compute, storage), "
+                          "architecture, how to run, the deployed contract address with explorer "
+                          "link, and what is mock data. DEMO.md: a 60 second demo script, click by "
+                          "click, with what to say. Read the code to get facts right. Reply briefly.",
+            },
+        },
+    }
+
+
+# Manifest and launcher data
+
+def manifest(sel):
+    out = []
+    a = claude_auth()
+    for agent in sel:
+        if agent == "claude":
+            note = {"apikey": "Anthropic", "gateway": "Anthropic (gateway)",
+                    "subscription": "Anthropic"}[a]
+        elif agent == "claude-0g":
+            note = "0G Compute (%s)" % val("OG_MODEL", "glm-5.3")
+        else:
+            note = "0G Compute"
+        out.append({"id": agent, "label": LABELS[agent],
+                    "command": LAUNCHER + " " + agent, "note": note,
+                    "ready": status(agent) == "ready"})
+    return out
+
+
+def launch_env(sel):
+    lines = ["# written by hackbox-ai-render; read by hackbox-agent. No secrets.",
+             "HB_AGENTS='%s'" % " ".join(sel)]
+    for agent in KNOWN:
+        key = agent.replace("-", "_")
+        secret, problem = requirement(agent)
+        lines.append("HB_BIN_%s=%s" % (key, "opencode" if agent == "opencode" else "claude"))
+        lines.append("HB_SECRET_%s=%s" % (key, secret))
+        lines.append("HB_PROBLEM_%s='%s'" % (key, problem or ""))
+        exp = ""
+        if agent == "claude" and claude_auth() == "subscription":
+            exp = "CLAUDE_CODE_OAUTH_TOKEN"
+        elif agent == "opencode":
+            exp = "ZG_ROUTER_API_KEY"
+        lines.append("HB_EXPORT_%s=%s" % (key, exp))
+    return "\n".join(lines) + "\n"
+
+
+def write(path, text, mode=0o644):
+    full = p(path)
+    d = os.path.dirname(full)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".hackbox-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        if not ROOT:
+            os.chown(tmp, 0, 0)
+        os.replace(tmp, full)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def dump(obj):
+    return json.dumps(obj, indent=2) + "\n"
+
+
+def render(sel):
+    write("/etc/claude-code/managed-settings.json", dump(claude_settings(sel)))
+    write("/etc/opencode/opencode.json", dump(opencode_config()))
+    write("/etc/hackbox/agents.json", dump(manifest(sel)))
+    write("/etc/hackbox/ai/launch.env", launch_env(sel))
+    write("/etc/hackbox/agents.selected", " ".join(sel) + "\n")
+
+
+def show():
+    sel = saved_selection()
+    if not sel:
+        print("agents: none set (default would be: %s)" % " ".join(words("AGENTS_DEFAULT", "claude opencode")))
+        sel = []
+    else:
+        print("agents: " + " ".join(sel))
+    print("claude auth: %s   0G router: %s" % (claude_auth(), router_base()))
+    for agent in KNOWN:
+        mark = "offered" if agent in sel else "off"
+        print("  %-10s %-8s %s" % (agent, mark, status(agent)))
+    print("takes effect at the next reset (a running agent keeps its settings)")
+
+
+def main(argv):
+    if not argv:
+        die("usage: hackbox-ai-render set <agent>... | current | show")
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "set":
+        sel = parse_selection(rest)
+        render(sel)
+        show()
+    elif cmd == "current":
+        render(parse_selection(saved_selection() or ["default"]))
+    elif cmd == "show":
+        show()
+    else:
+        die("unknown command %r" % cmd)
+
+
+main(sys.argv[1:])
+PY

@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# hackbox-help: status  (one line per lockdown control, OK or MISSING)
+# hackbox lock status: one line per lockdown control (SPEC section 5 plus the agent
+# policies): name, OK or MISSING, and the evidence. Exit 1 if anything is MISSING.
+# Read-only. Run as the admin user (uses sudo for root-only evidence).
+set -uo pipefail
+
+case "${1:-status}" in
+  status) ;;
+  *) echo "usage: hackbox lock status" >&2; exit 2 ;;
+esac
+
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+U=${HACKER_USER:-hacker}
+UID_N=${HACKER_UID:-2000}
+missing=0
+
+row() {  # row <name> <ok:0|1> <evidence>
+  local state=OK
+  if [ "$2" != 0 ]; then state=MISSING; missing=1; fi
+  printf '%-18s %-8s %s\n' "$1" "$state" "$3"
+}
+check() {  # check <name> <evidence> <command...>: OK when the command succeeds
+  local name=$1 ev=$2; shift 2
+  if "$@" >/dev/null 2>&1; then row "$name" 0 "$ev"; else row "$name" 1 "$ev"; fi
+}
+
+if ! id "$U" >/dev/null 2>&1; then
+  row account 1 "user $U does not exist"
+  exit 1
+fi
+
+# account
+groups=$(id -nG "$U")
+bad=$(echo "$groups" | tr ' ' '\n' | grep -xE 'sudo|admin|wheel|adm|lpadmin' | tr '\n' ' ')
+sudo_l=$(sudo -l -U "$U" 2>&1 | tail -1)
+if [ -z "$bad" ] && echo "$sudo_l" | grep -qi 'not allowed'; then
+  row no-sudo 0 "groups: $groups; sudo -l: not allowed"
+else
+  row no-sudo 1 "privileged groups: ${bad:-none}; sudo -l: $sudo_l"
+fi
+pw=$(sudo passwd -S "$U" 2>/dev/null | awk '{print $2}')
+[ "$pw" = L ]; row password-locked $? "passwd -S: ${pw:-?}"
+line=$(grep -E '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_wheel\.so.*group=sudo' /etc/pam.d/su)
+[ -n "$line" ]; row su-sudo-only $? "/etc/pam.d/su: ${line:-no active pam_wheel group=sudo line}"
+check cron-deny "$U in /etc/cron.deny" sudo grep -qx "$U" /etc/cron.deny
+check at-deny "$U in /etc/at.deny" sudo grep -qx "$U" /etc/at.deny
+[ ! -e "/var/lib/systemd/linger/$U" ]; row no-linger $? "/var/lib/systemd/linger/$U $( [ -e "/var/lib/systemd/linger/$U" ] && echo present || echo absent)"
+deny=$(sudo sshd -T 2>/dev/null | grep -i '^denyusers' | tr '\n' ' ')
+echo "$deny" | grep -qw "$U"; row sshd-deny $? "sshd -T: ${deny:-no DenyUsers}"
+mode=$(stat -c '%a' "$HOME")
+[ $(( 0$mode & 7 )) -eq 0 ]; row admin-home $? "$HOME mode $mode"
+
+# VT switching
+vt=$(grep -h '^NAutoVTs=' /etc/systemd/logind.conf.d/*.conf 2>/dev/null | tail -1)
+x=$(grep -hs 'DontVTSwitch' /etc/X11/xorg.conf.d/*.conf | head -1 | xargs)
+[ "$vt" = NAutoVTs=0 ] && [ -n "$x" ]; row vt-switch-off $? "logind ${vt:-NAutoVTs unset}; xorg ${x:-no DontVTSwitch} (applies after reboot / X restart)"
+
+# resources
+slice="user-$UID_N.slice"
+props=$(systemctl show "$slice" -p MemoryHigh -p MemoryMax -p MemorySwapMax -p CPUQuotaPerSecUSec -p TasksMax 2>/dev/null | tr '\n' ' ')
+[ -f "/etc/systemd/system/$slice.d/50-hackbox.conf" ] && ! echo "$props" | grep -qE 'MemoryMax=infinity|TasksMax=infinity'
+row slice-limits $? "$slice: ${props:-not loaded}"
+nproc_line=$(cat /etc/security/limits.d/90-hackbox.conf 2>/dev/null)
+[ -n "$nproc_line" ]; row nproc-limit $? "limits.d: ${nproc_line:-missing}"
+
+# network
+# nft output is captured before grepping: `| grep -q` under pipefail can fail on SIGPIPE.
+nft_out=$(sudo nft list chain inet hackbox output 2>/dev/null)
+nft_in=$(sudo nft list chain inet hackbox input 2>/dev/null)
+if [[ "$nft_out" == *"skuid $UID_N jump attendee"* ]]; then
+  row nft-egress 0 "table inet hackbox loaded, uid $UID_N jumps to attendee; unit $(systemctl is-enabled hackbox-nft.service 2>/dev/null)"
+else
+  row nft-egress 1 "table inet hackbox not loaded (sudo systemctl status hackbox-nft)"
+fi
+if printf '%s\n' "$nft_in" | grep -Eq 'counter.*drop'; then
+  ports=$(printf '%s\n' "$nft_in" | grep -o 'tcp dport [^a]*' | xargs)
+  row nft-inbound 0 "new inbound dropped except lo, tailscale0, ICMP, DHCP${ports:+; open: $ports}"
+else
+  row nft-inbound 1 "no input chain in table inet hackbox"
+fi
+if systemctl is-enabled --quiet nftables.service 2>/dev/null; then
+  row nftables-conf-off 1 "nftables.service is enabled (its /etc/nftables.conf flushes Tailscale's rules)"
+else
+  row nftables-conf-off 0 "nftables.service not enabled"
+fi
+if [ -n "${TS_TAG:-}" ]; then
+  tag=$TS_TAG; case "$tag" in tag:*) ;; *) tag="tag:$tag" ;; esac
+  tags=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).get("Self",{}).get("Tags") or []))' 2>/dev/null)
+  case " $tags " in *" $tag "*) row tailscale-tag 0 "self tags: $tags" ;; *) row tailscale-tag 1 "want $tag, self tags: ${tags:-none}" ;; esac
+else
+  row tailscale-tag 0 "not requested (TS_TAG unset)"
+fi
+
+# desktop
+prof=$(tr '\n' ' ' < /etc/dconf/profile/user 2>/dev/null)
+echo "$prof" | grep -q 'system-db:local' && [ -f /etc/dconf/db/local ]
+row dconf-system-db $? "profile: ${prof:-missing}; compiled db $( [ -f /etc/dconf/db/local ] && echo present || echo missing)"
+vals=""
+for k in /org/cinnamon/desktop/lockdown/disable-log-out /org/cinnamon/desktop/lockdown/disable-user-switching \
+         /org/cinnamon/desktop/lockdown/disable-lock-screen /org/cinnamon/desktop/screensaver/lock-enabled; do
+  vals="$vals ${k##*/}=$(DCONF_PROFILE=user dconf read "$k" 2>/dev/null)"
+done
+echo "$vals" | grep -q 'disable-log-out=true' && echo "$vals" | grep -q 'disable-user-switching=true' \
+  && echo "$vals" | grep -q 'disable-lock-screen=true' && echo "$vals" | grep -q 'lock-enabled=false' \
+  && grep -qx '/org/cinnamon/desktop/lockdown/disable-log-out' /etc/dconf/db/local.d/locks/00-hackbox 2>/dev/null
+row dconf-locks $? "effective:$vals; locks file $( [ -f /etc/dconf/db/local.d/locks/00-hackbox ] && echo present || echo missing)"
+ao=$(DCONF_PROFILE=user dconf read /org/cinnamon/desktop/media-handling/automount-open 2>/dev/null)
+usb="usb storage ${USB_STORAGE:-allow}"
+[ -f /etc/modprobe.d/hackbox-usb-storage.conf ] && usb="usb storage blocked (modprobe)"
+[ "$ao" = false ]; row usb-no-autoopen $? "automount-open=${ao:-unset}; $usb"
+pol=/etc/chromium/policies/managed/hackbox-lockdown.json
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("BrowserSignin")==0 and d.get("SyncDisabled") and d.get("PasswordManagerEnabled") is False and d.get("DeveloperToolsAvailability")==1 else 1)' "$pol" 2>/dev/null
+row chromium-policy $? "$pol: sign-in off, sync off, password manager off, DevTools on"
+
+# agents
+ms=/etc/claude-code/managed-settings.json
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); p=d.get("permissions",{}); sys.exit(0 if p.get("disableBypassPermissionsMode")=="disable" and p.get("defaultMode")=="acceptEdits" and d.get("env",{}).get("DISABLE_UPDATES")=="1" else 1)' "$ms" 2>/dev/null
+row claude-policy $? "$ms: bypass disabled, acceptEdits, updates off"
+oc=/etc/opencode/opencode.json
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("autoupdate") is False and d.get("share")=="disabled" and d.get("enabled_providers")==["0g"] else 1)' "$oc" 2>/dev/null
+row opencode-policy $? "$oc: autoupdate off, share disabled, provider 0g only"
+held=$(apt-mark showhold 2>/dev/null | grep -x claude-code)
+[ -n "$held" ]; row claude-held $? "apt-mark hold: ${held:-claude-code not held}"
+sd=$(stat -c '%U:%G %a' /etc/hackbox/secrets 2>/dev/null)
+[ "$sd" = "root:$U 750" ]; row secrets-dir $? "/etc/hackbox/secrets ${sd:-missing}"
+bad_keys=""
+for k in anthropic-api-key claude-gateway-token claude-oauth-token 0g-router-key; do
+  m=$(sudo stat -c '%U:%G %a' "/etc/hackbox/secrets/$k" 2>/dev/null) || continue
+  [ "$m" = "root:$U 640" ] || bad_keys="$bad_keys $k($m)"
+done
+[ -z "$bad_keys" ]; row secret-modes $? "${bad_keys:-key files root:$U 0640}"
+sel=$(cat /etc/hackbox/agents.selected 2>/dev/null)
+python3 -m json.tool /etc/hackbox/agents.json >/dev/null 2>&1
+row agents-manifest $? "/etc/hackbox/agents.json offers: ${sel:-nothing}"
+
+exit $missing

@@ -1,0 +1,216 @@
+#!/bin/bash
+# hack-box first boot (root, from hackbox-firstboot.service), written by the headless USB
+# installer. Finishes the box with nobody at it:
+#   wifi       /etc/hackbox/wifi.conf -> setup/03-wifi.sh (only when the conf exists)
+#   network    waits for a default route and DNS (forever; logs every 5 minutes)
+#   ssh        openssh-server installed and running, the owner's keys for the admin
+#   provision  every setup/NN-*.sh from /opt/hack-box as the admin user (bootstrap's loop, no
+#              git clone), each retried twice after 60 s if it fails; 05-tailscale.sh only
+#              when TS_AUTHKEY was given, with that key
+#   finish     disables this unit, reboots to the attendee welcome screen
+# Progress: /var/log/hackbox-firstboot.log, one timestamped line per step start and end, and a
+# last line HACKBOX-FIRSTBOOT-DONE rc=<n>. Full output: /var/log/hackbox-firstboot.detail.log.
+# Safe to rerun after a failure (`sudo systemctl start hackbox-firstboot`, or reboot): every
+# step and every setup script is idempotent. On failure the unit stays enabled, the box does
+# not reboot, and the next boot tries again.
+#
+# mDNS: 20-services.sh disables avahi and the firewall from 80-lockdown.sh drops udp/5353 from
+# the LAN. Until this run ends, avahi is kept running (started again after each script, not
+# re-enabled) and udp/5353 is accepted by a runtime rule, so <hostname>.local keeps answering
+# while the owner watches. The final reboot drops both: the repo's choice stands afterwards.
+set -uo pipefail
+
+LOG=/var/log/hackbox-firstboot.log
+DETAIL=/var/log/hackbox-firstboot.detail.log
+ENV=/etc/hackbox/headless.env
+REPO=/opt/hack-box
+export HB_PROGRESS=$LOG
+touch "$LOG" "$DETAIL"; chmod 0644 "$LOG"; chown root:adm "$DETAIL" 2>/dev/null; chmod 0640 "$DETAIL"
+
+exec 9>/run/hackbox-firstboot.lock
+flock -n 9 || { echo "already running"; exit 0; }
+
+set -a; [ -r "$ENV" ] && . "$ENV"; set +a
+. /usr/local/lib/hackbox/hb-common.sh
+ADMIN=${ADMIN_USER:-hackadmin}
+exec >>"$DETAIL" 2>&1
+
+run=$(grep -c ' RUN ' "$LOG" 2>/dev/null); run=$(( ${run:-0} + 1 ))
+hb_line "RUN $run begins (host $(hostname), admin $ADMIN)"
+
+# step <name> <command...>: START/END lines around a command, returns its rc.
+step() {
+  local name=$1; shift
+  local t0=$SECONDS rc
+  hb_line "START $name"
+  echo "===== $(hb_now) $name"
+  "$@"; rc=$?
+  hb_line "END $name rc=$rc $(( SECONDS - t0 ))s"
+  return $rc
+}
+
+fail() {
+  local rc=$1 what=$2
+  hb_line "FAILED at $what (rc=$rc). Details: sudo tail -n 60 $DETAIL. Rerun: sudo systemctl start hackbox-firstboot"
+  hb_report failed "$what rc=$rc"
+  hb_line "HACKBOX-FIRSTBOOT-DONE rc=$rc"
+  hb_beep sssss; sleep 20; hb_beep sssss
+  exit "$rc"
+}
+
+mdns_keep() {
+  systemctl is-active --quiet avahi-daemon || systemctl start avahi-daemon 2>/dev/null || true
+  if nft list chain inet hackbox input >/dev/null 2>&1 &&
+     ! nft list chain inet hackbox input | grep -q 'udp dport 5353 accept comment "hackbox-firstboot"'; then
+    nft insert rule inet hackbox input udp dport 5353 accept comment '"hackbox-firstboot"' || true
+  fi
+}
+
+do_wifi() {
+  if [ -f /etc/hackbox/wifi.conf ]; then bash "$REPO/setup/03-wifi.sh"; else echo "no wifi.conf (wired box)"; fi
+}
+
+do_network() {
+  local n=0
+  until ip -4 route show default | grep -q . && getent ahosts archive.ubuntu.com >/dev/null 2>&1; do
+    n=$((n + 1))
+    if [ $((n % 60)) -eq 0 ]; then
+      hb_line "WAITING for the network ($((n * 5 / 60)) min). Plug in a cable or check the Wi-Fi settings."
+      hb_beep s
+    fi
+    sleep 5
+  done
+  hb_line "NETWORK up ips=$(hb_ips)"
+  hb_report network
+}
+
+apt_quiet() {
+  # Mint's own apt timers must not hold the dpkg lock while setup runs.
+  systemctl stop apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+  printf 'DPkg::Lock::Timeout "600";\n' > /etc/apt/apt.conf.d/90hackbox-firstboot
+}
+
+do_ssh() {
+  apt_quiet
+  if ! dpkg-query -W -f='${Status}' openssh-server 2>/dev/null | grep -q 'ok installed'; then
+    local ok=0 i
+    for i in 1 2 3 4 5; do
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server && { ok=1; break; }
+      sleep 20
+    done
+    [ $ok = 1 ] || return 1
+  fi
+  local home; home=$(getent passwd "$ADMIN" | cut -d: -f6)
+  install -d -m 700 -o "$ADMIN" -g "$ADMIN" "$home/.ssh"
+  touch "$home/.ssh/authorized_keys"
+  while read -r line; do
+    [ -n "$line" ] || continue
+    grep -qF "$(echo "$line" | awk '{print $2}')" "$home/.ssh/authorized_keys" || echo "$line" >> "$home/.ssh/authorized_keys"
+  done < /etc/hackbox/headless-authorized_keys
+  chown "$ADMIN:$ADMIN" "$home/.ssh/authorized_keys"; chmod 600 "$home/.ssh/authorized_keys"
+  echo "$ADMIN ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$ADMIN"; chmod 0440 "/etc/sudoers.d/$ADMIN"
+  systemctl enable --now ssh
+  systemctl is-active --quiet ssh || return 1
+  hb_line "SSH ready: ssh $ADMIN@$(hostname).local (or $ADMIN@<ip>) ips=$(hb_ips)"
+  hb_report ssh-ready
+  hb_beep ss
+}
+
+# Run one setup script as the admin, with the admin's user manager (session bus for gsettings).
+as_admin() {
+  local uid; uid=$(id -u "$ADMIN")
+  systemctl start "user@$uid.service" 2>/dev/null || true
+  runuser -u "$ADMIN" -- env -i HOME="$(getent passwd "$ADMIN" | cut -d: -f6)" USER="$ADMIN" LOGNAME="$ADMIN" \
+    SHELL=/bin/bash PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=en_US.UTF-8 \
+    XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+    ${TS_TAG:+TS_TAG="$TS_TAG"} ${TS_AUTHKEY_ENV:+TS_AUTHKEY="$TS_AUTHKEY_ENV"} \
+    bash -c 'cd "$HOME" && "$@"' bash "$@"
+}
+
+lan_ssh_conf() {
+  # Without Tailscale the firewall would drop the owner's ssh from the LAN at 80-lockdown.
+  local want=${LAN_SSH:-auto} f=/etc/hackbox/conf.d/39-lockdown-local.conf
+  if [ "$want" = auto ]; then
+    if tailscale status >/dev/null 2>&1; then want=0; else want=1; fi
+  fi
+  install -d -m 0755 /etc/hackbox/conf.d
+  touch "$f"
+  sed -i '/^NFT_INBOUND_TCP=.*# hackbox-firstboot$/d' "$f"
+  if [ "$want" = 1 ]; then
+    echo 'NFT_INBOUND_TCP="22"  # hackbox-firstboot' >> "$f"
+    hb_line "LAN ssh stays open (tcp/22 inbound from the LAN; set by headless LAN_SSH=${LAN_SSH:-auto})"
+  else
+    hb_line "LAN ssh closed by the firewall after lockdown (reach the box over Tailscale)"
+  fi
+  if [ -n "${TS_TAG:-}" ] && tailscale status >/dev/null 2>&1 && ! grep -q '^TS_TAG=' "$f"; then
+    echo "TS_TAG=$TS_TAG" >> "$f"
+  fi
+}
+
+# Fleet stick: the hub hands out this box's name and token (needs the tailnet, so after
+# 05-tailscale.sh). A failure is not fatal: the box keeps hackbox-<mac4> and staff can run
+# `hackbox hub set` later.
+hub_enroll() {
+  local n
+  n=$(python3 "$REPO/files/hub/hackbox-hub-enroll") || return 1
+  hb_line "NAME $n (given by the hub)"
+}
+
+do_provision() {
+  as_admin sudo -n true || { echo "admin has no passwordless sudo"; return 1; }
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl || return 1
+  local s name rc
+  for s in "$REPO"/setup/[0-9][0-9]-*.sh; do
+    name=$(basename "$s")
+    case "$name" in
+      03-wifi.sh) continue ;;   # done above
+      05-tailscale.sh)
+        if [ ! -s /etc/hackbox/ts-authkey ]; then hb_line "SKIP $name (no TS_AUTHKEY: no browser login possible headless)"; continue; fi
+        TS_AUTHKEY_ENV=file:/etc/hackbox/ts-authkey
+        ;;
+      80-lockdown.sh) lan_ssh_conf ;;
+    esac
+    # Every setup script is idempotent: a failure (typically a mirror or DNS hiccup on a venue
+    # network) is retried twice after a pause before the run gives up.
+    local try
+    for try in 1 2 3; do
+      step "$name" as_admin bash "$s"; rc=$?
+      [ $rc -eq 0 ] && break
+      [ $try -lt 3 ] && { hb_line "RETRY $name in 60 s (attempt $((try + 1)) of 3)"; sleep 60; }
+    done
+    TS_AUTHKEY_ENV=""
+    if [ "$name" = 05-tailscale.sh ] && [ $rc -eq 0 ] &&
+       grep -q '^HUB_ENROLL_TOKEN=' /etc/hackbox/hub.conf 2>/dev/null; then
+      step hub-enroll hub_enroll || hb_line "WARN could not get a name from the hub; later: hackbox hub set"
+    fi
+    mdns_keep
+    if [ "$name" = 90-verify.sh ]; then
+      vout=$(awk -v m="$name" 'index($0, "===== ") == 1 && $NF == m { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' "$DETAIL")
+      summary=$(printf '%s\n' "$vout" | grep -a '^# summary:' | tail -n 1)
+      if [ -z "$summary" ]; then hb_line "VERIFY did not run (no summary line; see the detail log)"
+      elif printf '%s\n' "$vout" | grep -aq 'ALL NON-DESTRUCTIVE CHECKS PASSED'; then hb_line "VERIFY all non-destructive checks passed: $summary"
+      else hb_line "VERIFY some checks FAILED: $summary (sudo grep ^FAIL $DETAIL)"; fi
+    fi
+    [ $rc -eq 0 ] || { hb_report failed "$name"; return $rc; }
+    hb_report "done-$name"
+  done
+  rm -f /etc/hackbox/ts-authkey
+}
+
+hb_report firstboot-start
+step wifi do_wifi || true
+step network do_network
+step ssh do_ssh || fail $? ssh
+mdns_keep
+step provision do_provision || fail $? provision
+
+rm -f /etc/apt/apt.conf.d/90hackbox-firstboot
+systemctl disable hackbox-firstboot.service 2>/dev/null
+touch /var/lib/hackbox-firstboot.done
+hb_line "Provisioning finished. Rebooting to the attendee welcome screen in 20 s. Afterwards: ssh $ADMIN@<ip> hackbox status"
+hb_report done
+hb_line "HACKBOX-FIRSTBOOT-DONE rc=0"
+hb_beep sss
+sleep 20
+systemctl reboot

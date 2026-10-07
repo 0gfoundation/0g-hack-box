@@ -1,0 +1,16 @@
+# hack-box: talks to the session hub (download QR, dashboard, saved work).
+# Idle without /etc/hackbox/hub.conf. Enabled by `hackbox hub set`.
+# Installed by setup/70-session.sh.
+[Unit]
+Description=hack-box hub agent
+After=network-online.target hackbox-home.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/hackbox/hackbox-hubagent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

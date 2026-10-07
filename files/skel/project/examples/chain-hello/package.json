@@ -1,0 +1,17 @@
+{
+  "name": "chain-hello",
+  "private": true,
+  "type": "module",
+  "description": "Read the 0G Galileo testnet, make a throwaway wallet, send a tx, deploy a contract",
+  "scripts": {
+    "hello": "node hello.mjs",
+    "wallet": "node wallet.mjs",
+    "send": "node send.mjs",
+    "deploy": "node deploy.mjs"
+  },
+  "dependencies": {
+    "ethers": "6.13.1",
+    "solc": "^0.8.37"
+  },
+  "engines": { "node": ">=22" }
+}

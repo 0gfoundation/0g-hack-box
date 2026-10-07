@@ -1,0 +1,10 @@
+[/]
+visible-name='hack-box'
+use-system-font=false
+font='Monospace 13'
+default-size-columns=120
+default-size-rows=34
+scrollback-unlimited=false
+scrollback-lines=100000
+audible-bell=false
+use-theme-colors=true

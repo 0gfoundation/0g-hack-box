@@ -1,0 +1,10 @@
+# hack-box: the attendee's Done on the time-up screen (SPEC: docs/superpowers/specs/2026-10-01-session-hub-design.md).
+# polkit lets the attendee start this unit and nothing else; the script takes
+# no input from the attendee. Installed by setup/70-session.sh. No [Install].
+[Unit]
+Description=hack-box attendee request: done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hackbox-attendee-request done
+TimeoutStartSec=10

@@ -1,0 +1,43 @@
+#!/bin/bash
+# The attendee's two requests besides Start and End now. Runs as root under
+# hackbox-extend-request.service ("Ask for more time") or hackbox-done.service
+# (Done on the time-up screen); polkit lets the attendee start those two units
+# and nothing else. It takes no input from the attendee: it only checks the
+# state and drops a flag in /run/hackbox for the hub agent or the reset.
+#
+#   hackbox-attendee-request extend   flag a request, if a hub is set up, the
+#                                     session is active, none is pending and
+#                                     the last one was not declined < 2 min ago
+#   hackbox-attendee-request done     end the time-up screen now
+set -uo pipefail
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN=/run/hackbox
+log() { logger -t hackbox-request -- "$*"; }
+put() {
+  printf '%s\n' "$2" > "$RUN/.$1.tmp" && chmod 0644 "$RUN/.$1.tmp" &&
+    mv -f "$RUN/.$1.tmp" "$RUN/$1"
+}
+state=$(cat "$RUN/state" 2>/dev/null || true)
+
+case "${1:-}" in
+  extend)
+    [ "$state" = active ] || { log "extend request ignored, state '$state'"; exit 0; }
+    [ -f /etc/hackbox/hub.conf ] || { log "extend request ignored, no hub"; exit 0; }
+    if [ -e "$RUN/extend-request" ]; then log "extend request already pending"; exit 0; fi
+    if [ "$(cut -d' ' -f1 "$RUN/extend-status" 2>/dev/null)" = declined ] &&
+       [ $(( $(date +%s) - $(stat -c %Y "$RUN/extend-status") )) -lt 120 ]; then
+      log "extend request ignored, declined less than 2 minutes ago"; exit 0
+    fi
+    put extend-request "$(date +%s)"
+    put extend-status pending
+    log "attendee asked for more time"
+    ;;
+  done)
+    [ "$state" = ending ] || exit 0
+    put ending-done 1
+    ;;
+  *)
+    echo "usage: hackbox-attendee-request extend|done" >&2; exit 2 ;;
+esac

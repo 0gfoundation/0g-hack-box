@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# Reset hook (/etc/hackbox/reset.d/50-ai-seed), run as root after the fresh home is
+# populated, with HB_HOME exported. Seeds the per-user state the agents would otherwise
+# ask for on first launch:
+#   ~/.claude.json           onboarding done, ~/project trusted (so no trust dialog)
+#   ~/.claude/settings.json  dark theme (no theme picker)
+#   ~/.config/opencode/      OpenCode needs no config here (it is managed), only AGENTS.md:
+#   ~/.claude/CLAUDE.md and ~/.config/opencode/AGENTS.md
+#                            point both agents at the 0G agent skills in /opt/0g-agent-skills
+#                            (when present), so they know the 0G stack from the first prompt,
+#                            and at `0g-fund` for testnet 0G (when installed)
+#   ~/.config/hackbox/env    when opencode or claude-0g is offered: ZG_ROUTER_API_KEY,
+#                            OG_ROUTER_URL and OG_MODEL for the attendee's own code (the
+#                            starter kit's compute example reads them), sourced by a guarded
+#                            line appended to ~/.bashrc and ~/.profile (SPEC amendment A2).
+#                            The key is the same per-box, credit-limited key OpenCode already
+#                            reads; putting it in the environment adds no new exposure.
+# Never fails the reset: every problem is logged and the hook exits 0.
+set -uo pipefail
+
+log() { logger -t hackbox-ai-seed -- "$*" 2>/dev/null || echo "hackbox-ai-seed: $*" >&2; }
+trap 'log "error on line $LINENO, continuing"' ERR
+
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+home=${HB_HOME:-/home/${HACKER_USER:-hacker}}
+uid=${HACKER_UID:-2000}
+if [ ! -d "$home" ]; then
+  log "home $home missing, nothing seeded"
+  exit 0
+fi
+# HB_SEED_OWNER lets a dry run off the box skip chown.
+owner=${HB_SEED_OWNER:-$uid:$uid}
+
+python3 - "$home" <<'PY' || log "could not write .claude.json"
+import json, os, sys
+home = sys.argv[1]
+path = os.path.join(home, ".claude.json")
+data = {}
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+        if not isinstance(data, dict):
+            data = {}
+except (OSError, ValueError):
+    pass
+data["hasCompletedOnboarding"] = True
+projects = data.setdefault("projects", {})
+for d in (os.path.join(home, "project"),):
+    entry = projects.setdefault(d, {})
+    entry["hasTrustDialogAccepted"] = True
+    entry.setdefault("allowedTools", [])
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+
+sdir = os.path.join(home, ".claude")
+os.makedirs(sdir, exist_ok=True)
+spath = os.path.join(sdir, "settings.json")
+settings = {}
+try:
+    with open(spath) as fh:
+        settings = json.load(fh)
+        if not isinstance(settings, dict):
+            settings = {}
+except (OSError, ValueError):
+    pass
+settings.setdefault("theme", "dark")
+with open(spath, "w") as fh:
+    json.dump(settings, fh, indent=2)
+    fh.write("\n")
+PY
+
+mkdir -p "$home/.config/opencode" "$home/.config/hackbox"
+
+# 0G agent skills: one global instruction for each agent (the build.0g.ai installer's line,
+# with the shared copy instead of a per-project clone), plus the testnet 0G line when the
+# 0g-fund helper is installed.
+skills=/opt/0g-agent-skills
+fund=${HB_FUND_CMD:-/usr/local/bin/0g-fund}
+fundline=""
+if [ -x "$fund" ]; then
+  fundline='Testnet 0G for gas (Galileo): run `0g-fund <wallet address>` to fund a wallet, for example one you just created to deploy contracts. It sends testnet 0G from the event faucet (a small amount per session, enough for several deploys), waits and prints the tx hash. Do not ask the user to visit a faucet website. `0g-fund --status` shows what this session already got.'
+fi
+[ -r "$skills/CLAUDE.md" ] || log "no 0G agent skills in $skills (run: hackbox skills update)"
+for pair in "CLAUDE.md:$home/.claude/CLAUDE.md" "AGENTS.md:$home/.config/opencode/AGENTS.md"; do
+  src=${pair%%:*} dst=${pair#*:}
+  [ -r "$skills/CLAUDE.md" ] || [ -n "$fundline" ] || continue
+  {
+    echo "# Building on 0G"
+    if [ -r "$skills/CLAUDE.md" ]; then
+      cat <<EOF
+
+This machine is for building on 0G. For anything 0G (storage, compute, chain, Agentic ID,
+private computer), read and follow $skills/$src first. The skills are in
+$skills/skills/, the deeper patterns in $skills/patterns/ and working examples in
+$skills/examples/. Use them before guessing package names, versions or APIs.
+EOF
+    fi
+    if [ -n "$fundline" ]; then
+      echo
+      echo "$fundline"
+    fi
+    cat <<EOF
+
+## Working fast (sessions are short)
+
+- Plan first: write a 3 to 6 line plan, then build. Ship the smallest version that demos
+  end to end, then improve it. Keep replies short.
+- Work in parallel, always: in your FIRST step launch 3 to 5 subagents with the task tool,
+  all in ONE message so they run at the same time. Use \`contract\` (Solidity, fund, deploy),
+  \`frontend\` (the web UI), \`designer\` (polish once a first screen exists), \`reviewer\`
+  (run it, find and fix bugs, once it runs) and \`pitch\` (README.md and a 60 second
+  DEMO.md). Give each a complete brief (file paths, ABI or API shape, ports) because they
+  do not see this conversation. Launch another round as soon as one finishes.
+- Show progress early: start the dev server and give the user the URL as soon as the first
+  screen works, then keep improving it.
+- Keep context small: search with rg and read only the parts you need. Never read
+  node_modules, lock files, build output or large logs.
+- Start from the examples in $skills/examples/ when one fits instead of from scratch.
+
+## Contracts: fund and deploy yourself
+
+Do not stop at writing a contract. Create a fresh deployer wallet, keep its private key in
+the project's .env (and .env in .gitignore), fund it with \`0g-fund <address>\`, deploy to the
+0G Galileo testnet (chain details in $skills/), and show the explorer link to the contract.
+Write the deployed address and ABI where the frontend reads them.
+
+## Every app gets live AI (real 0G Compute)
+
+Give every app at least one AI feature that runs on 0G Compute: an assistant, an analyst,
+a writer, a generator, an agent chat. From browser code call the box's relay, which holds
+the key for you: POST http://127.0.0.1:4010/ai/chat with {"prompt": "...", "system": "..."}
+(answer in .reply), or the OpenAI compatible http://127.0.0.1:4010/v1/chat/completions
+(baseURL http://127.0.0.1:4010/v1, any apiKey, "stream": true for streaming). Stream long
+answers. Label these features "Powered by 0G Compute". Server code can also use
+ZG_ROUTER_API_KEY and OG_ROUTER_URL from the environment.
+
+## External APIs: use the local mock API
+
+Prices, candles, order books, trading pairs, an AI model or agent marketplace, NFT and data
+listings, news and wallet portfolios: when an app needs data like this from an outside
+service, use the mock API on this machine at http://127.0.0.1:4010 (no key, CORS open; GET /
+lists every endpoint, for example /prices?symbols=BTC,ETH,0G, /candles?symbol=ETH&interval=1m,
+/orderbook, /markets, /ai/models, /ai/agents, /marketplace/listings, /news,
+/portfolio?address=0x...). Prices move while you poll, so charts look live. It is fake data:
+always show a visible "Mock data" badge in the UI where it is used and tell the user it is
+mock data. AI is real (above) and contracts are real on the 0G chain; mock only what has no
+real source here.
+EOF
+  } > "$dst"
+done
+
+# Router environment for the attendee's own code (A2).
+envf="$home/.config/hackbox/env"
+selected=$(cat /etc/hackbox/agents.selected 2>/dev/null || true)
+router=${OG_ROUTER_URL:-https://router-api.0g.ai}
+router=${router%/}; router=${router%/v1}
+case " $selected " in
+  *" opencode "*|*" claude-0g "*)
+    # Braces: a missing file is reported by the redirection itself, before a
+    # 2>/dev/null on the command would apply.
+    key=$({ tr -d ' \t\r\n' < /etc/hackbox/secrets/0g-router-key; } 2>/dev/null || true)
+    {
+      echo "# hack-box: 0G Compute Router access for your own code. Wiped after your slot."
+      [ -n "$key" ] && printf 'export ZG_ROUTER_API_KEY=%q\n' "$key"
+      printf 'export OG_ROUTER_URL=%q\n' "$router"
+      printf 'export OG_MODEL=%q\n' "${OG_MODEL:-glm-5.3}"
+    } > "$envf"
+    chmod 0600 "$envf"
+    ;;
+  *) rm -f "$envf" ;;
+esac
+line='if [ -r "$HOME/.config/hackbox/env" ]; then . "$HOME/.config/hackbox/env"; fi  # hack-box agent env'
+for rc in "$home/.bashrc" "$home/.profile"; do
+  if ! grep -qF '.config/hackbox/env' "$rc" 2>/dev/null; then
+    printf '\n%s\n' "$line" >> "$rc"
+  fi
+done
+
+if [ "$owner" != skip ]; then
+  chown "$owner" "$home/.claude.json" "$home/.bashrc" "$home/.profile" 2>/dev/null
+  chown -R "$owner" "$home/.claude" "$home/.config/opencode" "$home/.config/hackbox" 2>/dev/null
+  chown "$owner" "$home/.config" 2>/dev/null
+fi
+log "seeded agent state in $home"
+exit 0

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# hackbox-help: end the session gracefully (time-up screen, then wipe)
+set -euo pipefail
+END_GRACE_SECONDS=20
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+RUN=/run/hackbox
+
+state=$(cat "$RUN/state" 2>/dev/null || true)
+case "$state" in
+  active)
+    sudo systemctl --no-block start hackbox-reset.service
+    echo "ending: time-up screen for ${END_GRACE_SECONDS}s, then the wipe"
+    echo "follow with: journalctl -t hackbox-reset -f"
+    ;;
+  ending|resetting)
+    echo "already $state"
+    ;;
+  *)
+    echo "hackbox: no active session (state '${state:-unknown}'); use 'hackbox reset' to wipe anyway" >&2
+    exit 1
+    ;;
+esac

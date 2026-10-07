@@ -1,0 +1,15 @@
+# hack-box: end the slot and wipe (SPEC 3.3). Started by the timer at zero,
+# by the attendee's "End now" (polkit allows start only), by the LightDM
+# cleanup hook, by hackbox-guard and by `hackbox end|reset`. A live session
+# gets the ending screen first unless /run/hackbox/reset-now exists.
+# Installed by setup/70-session.sh. No [Install]: never runs by itself.
+[Unit]
+Description=hack-box session reset
+After=hackbox-home.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hackbox-reset
+# Generous: the grace period plus every step's own timeout. A normal reset
+# is a few seconds; the script keeps a home mounted even if this fires.
+TimeoutStartSec=600

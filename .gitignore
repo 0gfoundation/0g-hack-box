@@ -1,0 +1,4 @@
+# Local secrets: copy .env.example to .env (never committed). Backups of it too.
+.env
+.env.*
+!.env.example

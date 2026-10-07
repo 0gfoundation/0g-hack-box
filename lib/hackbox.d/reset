@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# hackbox-help: wipe the attendee session now, no time-up screen
+set -euo pipefail
+RUN=/run/hackbox
+
+sudo install -d -m 0755 "$RUN"
+sudo touch "$RUN/reset-now"
+echo "resetting..."
+if ! sudo systemctl start hackbox-reset.service; then
+  echo "hackbox: reset failed, see: journalctl -t hackbox-reset -n 50" >&2
+  exit 1
+fi
+if read -r e s 2>/dev/null < /var/lib/hackbox/last-reset; then
+  echo "done in ${s}s at $(date -d "@$e" '+%H:%M:%S'), state $(cat "$RUN/state" 2>/dev/null)"
+fi

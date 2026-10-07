@@ -1,0 +1,15 @@
+/org/cinnamon/desktop/screensaver/lock-enabled
+/org/cinnamon/desktop/screensaver/idle-activation-enabled
+/org/cinnamon/desktop/session/idle-delay
+/org/cinnamon/settings-daemon/plugins/power/sleep-display-ac
+/org/cinnamon/settings-daemon/plugins/power/sleep-inactive-ac-timeout
+/org/cinnamon/settings-daemon/plugins/power/idle-dim-time
+/org/cinnamon/settings-daemon/plugins/power/button-power
+/org/cinnamon/desktop/lockdown/disable-lock-screen
+/org/cinnamon/desktop/lockdown/disable-user-switching
+/org/cinnamon/desktop/lockdown/disable-log-out
+/org/cinnamon/desktop/lockdown/disable-printing
+/org/cinnamon/desktop/lockdown/disable-print-setup
+/org/cinnamon/desktop/media-handling/automount-open
+/org/cinnamon/desktop/media-handling/autorun-never
+/org/cinnamon/desktop/keybindings/media-keys/screensaver

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Start one agent for the attendee: `hackbox-agent claude|claude-0g|opencode [args]`.
+# This is the `command` in /etc/hackbox/agents.json. It checks the agent's secret first so
+# a box without keys prints one friendly line instead of a login flow or a stack trace,
+# exports what the subscription route needs, and starts the harness in ~/project.
+set -euo pipefail
+
+id=${1:-}
+[ $# -gt 0 ] && shift
+env_file=/etc/hackbox/ai/launch.env
+
+say() { printf '\n  %s\n\n' "$*" >&2; }
+
+if [ ! -r "$env_file" ]; then
+  say "The AI agents are not set up on this station yet. Please ask a staff member."
+  exit 1
+fi
+. "$env_file"
+
+case "$id" in
+  claude|claude-0g|opencode) ;;
+  *) say "Unknown agent '$id'. Choose one of: ${HB_AGENTS:-claude opencode}"; exit 2 ;;
+esac
+
+key=${id//-/_}
+bin_var=HB_BIN_$key; secret_var=HB_SECRET_$key; problem_var=HB_PROBLEM_$key; export_var=HB_EXPORT_$key
+bin=${!bin_var:-}; secret=${!secret_var:-}; problem=${!problem_var:-}; export_name=${!export_var:-}
+
+case " ${HB_AGENTS:-} " in
+  *" $id "*) ;;
+  *) say "This station does not offer '$id' right now (offered: ${HB_AGENTS:-none})."; exit 2 ;;
+esac
+
+if [ -n "$problem" ]; then
+  say "This station is not fully set up for $id yet ($problem). Please ask a staff member."
+  exit 3
+fi
+secret_file=/etc/hackbox/secrets/$secret
+if [ ! -r "$secret_file" ] || [ ! -s "$secret_file" ]; then
+  say "This station has no key for $id yet. Please ask a staff member."
+  exit 3
+fi
+
+if [ -n "$export_name" ]; then
+  export "$export_name=$(tr -d ' \t\r\n' < "$secret_file")"
+fi
+export OPENCODE_DISABLE_AUTOUPDATE=1
+
+if [ "$PWD" = "$HOME" ] && [ -d "$HOME/project" ]; then
+  cd "$HOME/project"
+fi
+
+exe=$(PATH=/usr/local/bin:/usr/bin:/bin command -v "$bin" || true)
+if [ -z "$exe" ]; then
+  say "$bin is not installed on this station. Please ask a staff member."
+  exit 4
+fi
+
+# Idea starter: the welcome screen saves the chosen idea; OpenCode gets its brief (plus the
+# shared build tail) as the first prompt. Used once: the file goes, so a relaunch starts plain.
+starter_file=$HOME/.cache/hackbox/starter
+if [ "$id" = opencode ] && [ $# -eq 0 ] && [ -f "$starter_file" ] && [ -r /etc/hackbox/ai/starters.json ]; then
+  starter=$(head -c 40 "$starter_file" | tr -cd 'a-z0-9-')
+  rm -f "$starter_file"
+  brief=$(python3 - "$starter" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open("/etc/hackbox/ai/starters.json"))
+s = next((s for s in d.get("starters", []) if s.get("id") == sys.argv[1]), None)
+if s and s.get("brief"):
+    print(s["brief"] + "\n\n" + d.get("tail", ""))
+PY
+)
+  if [ -n "$brief" ]; then
+    exec "$exe" --prompt "$brief"
+  fi
+fi
+exec "$exe" "$@"

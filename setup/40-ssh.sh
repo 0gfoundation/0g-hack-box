@@ -15,10 +15,13 @@ done
 echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/"$USER" >/dev/null
 sudo chmod 440 /etc/sudoers.d/"$USER"
 
+# DenyUsers: the attendee account (password locked) must never be reachable over ssh,
+# even if a key lands in its home during a session.
 sudo tee /etc/ssh/sshd_config.d/hack-box.conf >/dev/null <<'CONF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
+DenyUsers hacker
 CONF
 
 sudo systemctl enable --now ssh

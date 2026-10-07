@@ -1,0 +1,95 @@
+#!/bin/bash
+# The session clock (SPEC 3.4). Runs as root under hackbox-session.service,
+# which the attendee may only start (polkit), never stop or restart. Nothing
+# the attendee can write is read here: the end time lives in root-owned
+# /run/hackbox/session-end, and only `hackbox extend` (root) moves it.
+#
+# idle -> active: write session-end and state. Then tick once a second,
+# publish the 5 and 1 minute warnings in /run/hackbox/warn for the overlay,
+# and at zero hand over to hackbox-reset.service, which shows the ending
+# screen and wipes. Restarted after a crash, it resumes the same end time.
+set -uo pipefail
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+SESSION_MINUTES=30 WARN_MINUTES="5 1"
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+
+RUN=/run/hackbox
+log() { logger -t hackbox-session -- "$*"; }
+put() {
+  printf '%s\n' "$2" > "$RUN/.$1.tmp" && chmod 0644 "$RUN/.$1.tmp" &&
+    mv -f "$RUN/.$1.tmp" "$RUN/$1"
+}
+int_of() { local v; v=$(cat "$RUN/$1" 2>/dev/null) || return 1; [[ $v =~ ^[0-9]+$ ]] && echo "$v"; }
+
+install -d -m 0755 -o root -g root "$RUN"
+
+# Minutes for this slot: staff may set them with `hackbox start N`, which
+# writes start-minutes (root only). Always consumed so it cannot leak into
+# the next slot.
+minutes=$SESSION_MINUTES
+if m=$(int_of start-minutes) && [ "$m" -ge 1 ] && [ "$m" -le 600 ]; then minutes=$m; fi
+rm -f "$RUN/start-minutes"
+[[ $minutes =~ ^[0-9]+$ ]] && [ "$minutes" -ge 1 ] || minutes=30
+
+state=$(cat "$RUN/state" 2>/dev/null || true)
+case "$state" in
+  idle)
+    end=$(( $(date +%s) + minutes * 60 ))
+    rm -f "$RUN/warn" "$RUN/code" "$RUN/ending-until"
+    put session-end "$end"
+    put state active
+    log "session started: $minutes minutes, ends $(date -d "@$end" '+%H:%M:%S')"
+    ;;
+  active)
+    if ! end=$(int_of session-end); then
+      end=$(( $(date +%s) + minutes * 60 ))
+      put session-end "$end"
+    fi
+    log "timer resumed, ends $(date -d "@$end" '+%H:%M:%S')"
+    ;;
+  *)
+    log "state is '${state:-missing}', not starting a session"
+    exit 0
+    ;;
+esac
+
+# One flag per warning threshold, re-armed if an extension moves the end
+# time back above it.
+declare -a fired=()
+while :; do
+  state=$(cat "$RUN/state" 2>/dev/null || true)
+  if [ "$state" != active ]; then
+    log "state is now '$state', timer exits"
+    exit 0
+  fi
+  if e=$(int_of session-end); then end=$e; fi   # keep the last good value
+  left=$(( end - $(date +%s) ))
+  if [ "$left" -le 0 ]; then
+    log "time is up"
+    # --no-block: the reset stops this unit, so waiting would deadlock.
+    systemctl --no-block start hackbox-reset.service || exit 1
+    exit 0
+  fi
+  i=0
+  for w in $WARN_MINUTES; do
+    [[ $w =~ ^[0-9]+$ ]] || continue
+    t=$(( w * 60 ))
+    if [ "$left" -le "$t" ]; then
+      if [ -z "${fired[$i]:-}" ]; then
+        fired[i]=1
+        # Only announce when the threshold was actually crossed just now,
+        # not when a short session starts already below it.
+        if [ "$left" -gt $(( t - 30 )) ]; then
+          put warn "$w $(date +%s)"
+          log "warning: $w minute(s) left"
+        fi
+      fi
+    elif [ "$left" -gt $(( t + 2 )) ]; then
+      fired[i]=
+    fi
+    i=$(( i + 1 ))
+  done
+  sleep 1
+done

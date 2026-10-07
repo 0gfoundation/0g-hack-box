@@ -1,0 +1,34 @@
+{
+  "public_base_url": "http://localhost:8210",
+  "boxes": {
+    "devtoken": "hackbox1"
+  },
+  "github": {"org": "0g-hackbox-sessions", "token": ""},
+  "download_days": 7,
+  "enroll_token": "",
+  "name_prefix": "hackbox",
+  "pay": {
+    "api_url": "",
+    "source_lot_id": "",
+    "signer_key": "",
+    "amount_micros": 10000000,
+    "max_per_wallet": 2,
+    "ref_tag": "devday-sg-2026",
+    "expires_at": "",
+    "spend_url": "https://pc.0g.ai",
+    "expiry_label": "13 October 2026"
+  },
+  "faucet": {
+    "api_url": "https://faucet-api.udhaykumarbala.dev",
+    "api_key": "",
+    "promo_code": "",
+    "amount_og": 0.5,
+    "session_max_og": 1,
+    "wallet_max_og": 1,
+    "box_hourly_max_og": 2,
+    "event_budget_og": 50,
+    "event_since": "",
+    "ip_per_minute": 30,
+    "ref_tag": "hackbox"
+  }
+}

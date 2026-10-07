@@ -1,0 +1,18 @@
+[Unit]
+Description=hack-box builder API on 127.0.0.1:4010: mock prices, markets, AI marketplace, plus a live 0G Compute AI relay
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/0g-mock-api --host 127.0.0.1 --port 4010
+DynamicUser=yes
+# The AI relay reads the box's router key (root:hacker 0640), like the attendee's shell can.
+SupplementaryGroups=hacker
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

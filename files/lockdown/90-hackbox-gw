@@ -1,0 +1,12 @@
+#!/bin/bash
+# NetworkManager dispatcher: keep set lan_gw4 in table inet hackbox equal to the current
+# IPv4 default gateway(s), so the attendee may send DNS straight to the router (and to
+# nothing else on it). Does nothing if the table is not loaded.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+case "${2:-}" in up|down|dhcp4-change|connectivity-change|refresh) ;; *) exit 0 ;; esac
+nft list set inet hackbox lan_gw4 >/dev/null 2>&1 || exit 0
+nft flush set inet hackbox lan_gw4
+for gw in $(ip -4 route show default | awk '{print $3}' | sort -u); do
+  nft add element inet hackbox lan_gw4 "{ $gw }" 2>/dev/null || true
+done
+exit 0

@@ -1,0 +1,52 @@
+# hack-box system dconf defaults (Cinnamon). Installed to /etc/dconf/db/local.d/ and
+# compiled with `dconf update`. Applies to every user through /etc/dconf/profile/user,
+# including the attendee. Same values as setup/50-desktop.sh plus the kiosk lockdown.
+
+[org/cinnamon/desktop/interface]
+gtk-theme='Mint-Y-Dark-Aqua'
+icon-theme='Mint-Y-Aqua'
+
+[org/cinnamon/theme]
+name='Mint-Y-Dark-Aqua'
+
+[org/cinnamon/desktop/wm/preferences]
+theme='Mint-Y-Dark-Aqua'
+
+[org/x/apps/portal]
+color-scheme='prefer-dark'
+
+[org/cinnamon/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+
+[org/cinnamon/desktop/session]
+idle-delay=uint32 0
+
+[org/cinnamon/settings-daemon/plugins/power]
+sleep-display-ac=0
+sleep-inactive-ac-timeout=0
+idle-dim-time=0
+button-power='nothing'
+
+[org/cinnamon/desktop/notifications]
+display-notifications=false
+
+[org/cinnamon/desktop/lockdown]
+# attendees need the terminal
+disable-command-line=false
+disable-lock-screen=true
+disable-user-switching=true
+disable-log-out=true
+disable-printing=true
+disable-print-setup=true
+
+[org/cinnamon/desktop/keybindings/media-keys]
+# Ctrl+Alt+L locks the session through cinnamon-screensaver even with
+# disable-lock-screen=true (seen on Mint 22.3), and the attendee's password is
+# locked, so nobody could unlock it. No binding at all.
+screensaver=@as []
+
+[org/cinnamon/desktop/media-handling]
+automount=true
+automount-open=false
+autorun-never=true

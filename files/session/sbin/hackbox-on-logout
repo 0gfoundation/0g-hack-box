@@ -1,0 +1,23 @@
+#!/bin/sh
+# LightDM session-cleanup-script: LightDM runs it as root whenever a user
+# session ends. If the attendee's session ended outside a reset (X crashed,
+# a logout slipped past the dconf lock), wipe now: autologin then returns to
+# the welcome screen. --no-block because the reset stops LightDM, which is
+# waiting for this script.
+HACKER_USER=hacker
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+
+# LightDM exports USER for the session being cleaned up. If it is missing,
+# assume it was the attendee: a spare reset is harmless, a missed one is not.
+[ -n "${USER:-}" ] && [ "$USER" != "$HACKER_USER" ] && exit 0
+
+state=$(cat /run/hackbox/state 2>/dev/null)
+case "$state" in
+  ending|resetting) exit 0 ;;   # a reset is already under way
+esac
+
+logger -t hackbox-reset -- "session of ${USER:-unknown} ended (state ${state:-missing}), starting reset"
+mkdir -p /run/hackbox
+: > /run/hackbox/reset-now
+systemctl --no-block start hackbox-reset.service
+exit 0

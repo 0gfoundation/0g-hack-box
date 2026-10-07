@@ -1,0 +1,6 @@
+[init]
+	defaultBranch = main
+[pull]
+	rebase = false
+[advice]
+	detachedHead = false

@@ -1,0 +1,17 @@
+# hack-box: build a fresh attendee home on every boot, before LightDM can
+# autologin. Installed by setup/70-session.sh. Never restart this unit on a
+# running box: lightdm.service Requires= it, so a restart takes the display
+# down with it.
+[Unit]
+Description=hack-box fresh attendee home
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=lightdm.service display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hackbox-reset --boot
+TimeoutStartSec=300
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# hackbox-help: session state, time left, agents, load, memory, home disk, last reset [--json]
+# Read-only, no sudo needed: everything it reads is world-readable.
+set -euo pipefail
+
+SESSION_MINUTES=30 HACKER_USER=hacker
+for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done
+RUN=/run/hackbox
+H=/home/$HACKER_USER
+
+JSON=0
+case "${1:-}" in
+  --json) JSON=1 ;;
+  "") ;;
+  *) echo "usage: hackbox status [--json]" >&2; exit 2 ;;
+esac
+
+rd() { cat "$RUN/$1" 2>/dev/null || true; }
+isint() { [[ ${1:-} =~ ^-?[0-9]+$ ]]; }
+
+now=$(date +%s)
+state=$(rd state); [ -n "$state" ] || state=unknown
+end=$(rd session-end)
+seconds_left=null
+if [ "$state" = active ] && isint "$end"; then
+  seconds_left=$(( end - now )); [ "$seconds_left" -ge 0 ] || seconds_left=0
+elif [ "$state" = ending ]; then
+  seconds_left=0
+fi
+code=$(rd code)
+degraded=$(rd degraded)
+
+# Agent ids from the manifest (SPEC 3.7), in order.
+agents=()
+if [ -r /etc/hackbox/agents.json ]; then
+  while IFS= read -r a; do [ -n "$a" ] && agents+=("$a"); done < <(
+    python3 - <<'PY' 2>/dev/null || true
+import json
+try:
+    data = json.load(open("/etc/hackbox/agents.json"))
+    for e in data if isinstance(data, list) else []:
+        if isinstance(e, dict) and isinstance(e.get("command"), str):
+            print(str(e.get("id", e.get("label", ""))))
+except Exception:
+    pass
+PY
+  )
+fi
+
+load1=$(cut -d' ' -f1 /proc/loadavg)
+mem_total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+mem_avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+mem_total_mb=$(( mem_total_kb / 1024 ))
+mem_used_mb=$(( (mem_total_kb - mem_avail_kb) / 1024 ))
+
+home_used_mb=null; home_size_mb=null; home_mounted=false
+if mountpoint -q "$H"; then
+  home_mounted=true
+  read -r home_used_mb home_size_mb < <(df -BM --output=used,size "$H" | tail -n 1 | tr -d 'M')
+fi
+
+last_reset_epoch=null; last_reset_seconds=null
+if read -r e s 2>/dev/null < /var/lib/hackbox/last-reset; then
+  isint "$e" && last_reset_epoch=$e
+  [[ $s =~ ^[0-9]+(\.[0-9]+)?$ ]] && last_reset_seconds=$s
+fi
+timer=$(systemctl is-active hackbox-session.service 2>/dev/null || true)
+host=$(hostname)
+
+jstr() {  # JSON string
+  local s=${1//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/ }; s=${s//$'\t'/ }
+  printf '"%s"' "$s"
+}
+jnull() { if [ -z "${1:-}" ]; then printf null; else jstr "$1"; fi; }
+
+if [ "$JSON" = 1 ]; then
+  alist=""
+  for a in ${agents[@]+"${agents[@]}"}; do alist+="${alist:+,}$(jstr "$a")"; done
+  printf '{'
+  printf '"state":%s,' "$(jstr "$state")"
+  printf '"seconds_left":%s,' "$seconds_left"
+  printf '"session_end_epoch":%s,' "$(isint "$end" && [ "$state" = active ] && echo "$end" || echo null)"
+  printf '"session_minutes":%s,' "$(isint "$SESSION_MINUTES" && echo "$SESSION_MINUTES" || echo null)"
+  printf '"timer":%s,' "$(jstr "$timer")"
+  printf '"archive_code":%s,' "$(jnull "$code")"
+  printf '"agents":[%s],' "$alist"
+  printf '"load1":%s,' "$load1"
+  printf '"mem_used_mb":%s,' "$mem_used_mb"
+  printf '"mem_total_mb":%s,' "$mem_total_mb"
+  printf '"home_mounted":%s,' "$home_mounted"
+  printf '"home_used_mb":%s,' "$home_used_mb"
+  printf '"home_size_mb":%s,' "$home_size_mb"
+  printf '"degraded":%s,' "$(jnull "$degraded")"
+  printf '"last_reset_epoch":%s,' "$last_reset_epoch"
+  printf '"last_reset_seconds":%s,' "$last_reset_seconds"
+  printf '"hostname":%s' "$(jstr "$host")"
+  printf '}\n'
+  exit 0
+fi
+
+fmt_left() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+echo "host        $host"
+case "$state" in
+  active)
+    if [ "$seconds_left" = null ]; then echo "state       active, no end time (timer $timer)"
+    else echo "state       active, $(fmt_left "$seconds_left") left (timer $timer)"; fi ;;
+  ending) echo "state       ending (time-up screen), code ${code:-none}" ;;
+  *)      echo "state       $state" ;;
+esac
+echo "session     $SESSION_MINUTES minutes"
+echo "agents      ${agents[*]:-none (generic Start button)}"
+echo "load        $load1"
+echo "memory      $mem_used_mb / $mem_total_mb MB"
+if [ "$home_mounted" = true ]; then
+  echo "home        $home_used_mb / $home_size_mb MB"
+else
+  echo "home        NOT MOUNTED"
+fi
+[ -n "$degraded" ] && echo "WARNING     $degraded"
+if [ "$last_reset_epoch" != null ]; then
+  echo "last reset  $(date -d "@$last_reset_epoch" '+%Y-%m-%d %H:%M:%S'), took ${last_reset_seconds}s"
+else
+  echo "last reset  never"
+fi

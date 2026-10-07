@@ -1,0 +1,51 @@
+// hack-box: what the attendee may do that needs authorisation (SPEC 3.4).
+// Allowed: start its own session timer, "End now", "Ask for more time" and
+// "Done" (start only, those four units only), mount/eject USB sticks (SPEC 5),
+// and a few harmless desktop actions that would otherwise log errors.
+// Everything else is denied with
+// no prompt: power off, reboot, suspend, linger, NetworkManager changes,
+// package installs, pkexec, time and host name, other units.
+// Installed as /etc/polkit-1/rules.d/10-hackbox.rules; the low number makes
+// it run before distribution rules that might say yes.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "hacker") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    if (action.id === "org.freedesktop.systemd1.manage-units") {
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+        // Start button, End now, Ask for more time, Done. The last two are
+        // root oneshots that only drop a flag (hackbox-attendee-request).
+        if (verb === "start" &&
+            (unit === "hackbox-session.service" || unit === "hackbox-reset.service" ||
+             unit === "hackbox-extend-request.service" || unit === "hackbox-done.service")) {
+            return polkit.Result.YES;
+        }
+        return polkit.Result.NO;
+    }
+
+    var allowed = [
+        // USB sticks: attendees may copy their work out.
+        "org.freedesktop.udisks2.filesystem-mount",
+        "org.freedesktop.udisks2.eject-media",
+        "org.freedesktop.udisks2.power-off-drive",
+        // Audio threads (PipeWire) ask for realtime priority.
+        "org.freedesktop.RealtimeKit1.acquire-high-priority",
+        "org.freedesktop.RealtimeKit1.acquire-real-time",
+        // Desktop components take these at login; denying them only logs noise.
+        "org.freedesktop.login1.inhibit-delay-shutdown",
+        "org.freedesktop.login1.inhibit-delay-sleep",
+        "org.freedesktop.login1.inhibit-block-idle",
+        "org.freedesktop.login1.inhibit-handle-power-key",
+        "org.freedesktop.login1.inhibit-handle-suspend-key",
+        "org.freedesktop.login1.inhibit-handle-hibernate-key",
+        "org.freedesktop.login1.inhibit-handle-lid-switch",
+        "org.freedesktop.login1.inhibit-handle-reboot-key"
+    ];
+    if (allowed.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+
+    return polkit.Result.NO;
+});

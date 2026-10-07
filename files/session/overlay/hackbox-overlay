@@ -1,0 +1,1431 @@
+#!/usr/bin/env python3
+"""hack-box overlay: the attendee-facing face of the session engine.
+
+Runs as the attendee inside the Cinnamon session (autostarted from the
+skeleton, relaunched by hackbox-guard if killed). It is only a display: it
+reads the state that root writes to /run/hackbox and asks systemd (through
+the polkit rule) to start the session timer or the reset. Killing it changes
+nothing about the clock.
+
+Faces, by /run/hackbox/state (SPEC 3.2 and 3.6):
+  idle       full-screen welcome, rules, one Start button per agent
+             (with a hub: the attendee's name first)
+  active     small always-on-top countdown pill with "End now"
+             (with a hub: "More time", which asks the staff)
+  ending     full-screen "Time is up" with the archive code
+             (with a hub: QR code and link to download, and Done)
+  resetting  full-screen "Resetting"
+
+Python 3 and GTK 3 through gi only (both ship with Mint Cinnamon). No GL.
+"""
+
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
+
+RUN = "/run/hackbox"
+ASSETS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets")
+AGENTS_FILE = "/etc/hackbox/agents.json"
+STARTERS_FILE = "/etc/hackbox/ai/starters.json"
+HOME = os.path.expanduser("~")
+PROJECT = os.path.join(HOME, "project")
+TERMINAL_PROFILE = os.path.join(HOME, ".config", "hackbox", "gnome-terminal.dconf")
+TERMINAL_PROFILE_PATH = "/org/gnome/terminal/legacy/profiles:/:b1dcc9dd-5262-4d8d-a863-c897e6d979b9/"
+
+# Shown after an agent exits, so the attendee is left in a usable shell.
+AGENT_WRAPPER = (
+    'eval "$1"; rc=$?; echo; '
+    'echo "[hack-box] $2 exited (status $rc). This is a normal shell in ~/project."; '
+    'echo "[hack-box] Run the agent again with: $1"; '
+    "exec bash -i"
+)
+
+
+# --------------------------------------------------------------- inputs ---
+
+def load_conf():
+    """Source /etc/hackbox/conf.d the same way the shell helpers do."""
+    # EVENT_TITLE and EVENT_LINE brand the screens (override in conf.d/90-local.conf).
+    conf = {"SESSION_MINUTES": "30", "WARN_MINUTES": "5 1",
+            "END_GRACE_SECONDS": "20", "ARCHIVE_HOURS": "24", "HUB_ENABLED": "0",
+            "EVENT_TITLE": "DEV DAY", "EVENT_LINE": "05 OCT . 2026 . SINGAPORE",
+            # REWARD_TEXT: shown on the welcome and time-up screens when set.
+            # START_URL: opened next to the agent's terminal (right 30 %) when a session starts.
+            "REWARD_TEXT": "", "START_URL": ""}
+    script = ('for f in /etc/hackbox/conf.d/*.conf; do [ -r "$f" ] && . "$f"; done; '
+              'printf "%s\\n" "$SESSION_MINUTES" "$WARN_MINUTES" "$END_GRACE_SECONDS" "$ARCHIVE_HOURS" '
+              '"$HUB_ENABLED" "$EVENT_TITLE" "$EVENT_LINE" "$REWARD_TEXT" "$START_URL"')
+    try:
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                             timeout=5, env={"PATH": "/usr/bin:/bin"}).stdout.split("\n")
+        for key, val in zip(("SESSION_MINUTES", "WARN_MINUTES", "END_GRACE_SECONDS",
+                             "ARCHIVE_HOURS", "HUB_ENABLED", "EVENT_TITLE", "EVENT_LINE",
+                             "REWARD_TEXT", "START_URL"), out):
+            if val.strip():
+                conf[key] = val.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return conf
+
+
+def as_int(value, default):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def load_agents():
+    """Entries from agents.json (SPEC 3.7). Empty list means generic mode."""
+    try:
+        with open(AGENTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    agents = []
+    if not isinstance(data, list):
+        return []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        label, command = entry.get("label"), entry.get("command")
+        if not isinstance(label, str) or not isinstance(command, str):
+            continue
+        if not label.strip() or not command.strip():
+            continue
+        note = entry.get("note") if isinstance(entry.get("note"), str) else ""
+        agents.append({"id": str(entry.get("id", label)), "label": label.strip(),
+                       "command": command.strip(), "note": note.strip(),
+                       # false when the box has no key for it yet (hackbox-ai-render)
+                       "ready": entry.get("ready", True) is not False})
+    return agents
+
+
+def read_run(name):
+    try:
+        with open(os.path.join(RUN, name), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def read_run_int(name):
+    return as_int(read_run(name), None)
+
+
+# -------------------------------------------------------------- actions ---
+
+def start_unit(unit, done):
+    """systemctl start --no-block <unit> in a thread; done(ok, message) on
+    the GTK main loop. The polkit rule decides; nothing here is trusted."""
+    def work():
+        try:
+            r = subprocess.run(["systemctl", "start", "--no-block", unit],
+                               capture_output=True, text=True, timeout=20)
+            ok, msg = r.returncode == 0, (r.stderr or r.stdout).strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            ok, msg = False, str(e)
+        GLib.idle_add(done, ok, msg)
+    threading.Thread(target=work, daemon=True).start()
+
+
+def load_starters():
+    """Idea starters for the welcome card (id and label), or [] without the file."""
+    try:
+        with open(STARTERS_FILE, encoding="utf-8") as fh:
+            items = json.load(fh).get("starters") or []
+        return [s for s in items if s.get("id") and s.get("label")][:6]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def save_starter(starter_id):
+    """The chosen idea, for hackbox-agent to turn into OpenCode's first prompt."""
+    path = os.path.join(HOME, ".cache", "hackbox", "starter")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(starter_id[:40] + "\n")
+    except OSError:
+        pass
+
+
+def save_attendee(name, agent_id, email="", telegram=""):
+    """Name and agent for the hub agent, which reads this file as root with
+    care (no symlinks, small, owned by the attendee). The home is wiped at
+    every reset, so it cannot leak into the next session."""
+    path = os.path.join(HOME, ".cache", "hackbox", "attendee")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(name[:40] + "\n" + agent_id[:30] + "\n" + email[:120] + "\n" +
+                    telegram[:33] + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def open_terminal(agent=None, url=""):
+    """A terminal in ~/project, running the agent if given, else a shell. With a URL the
+    terminal takes the left 70 % of the screen and Firefox the right 30 %."""
+    os.makedirs(PROJECT, exist_ok=True)
+    if agent:
+        inner = ["bash", "-lc", AGENT_WRAPPER, "hackbox-agent", agent["command"], agent["label"]]
+    else:
+        inner = ["bash", "-l"]
+    side = bool(url) and shutil.which("firefox") and shutil.which("wmctrl")
+    if shutil.which("gnome-terminal"):
+        argv = ["gnome-terminal", "--working-directory=" + PROJECT] + \
+               ([] if side else ["--maximize"]) + ["--"] + inner
+    elif shutil.which("x-terminal-emulator"):
+        argv = ["x-terminal-emulator", "-e"] + inner
+    else:
+        return False
+    try:
+        subprocess.Popen(argv, cwd=PROJECT, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        if side:
+            subprocess.Popen(["firefox", "--new-window", url], cwd=HOME, start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            threading.Thread(target=tile_side_by_side, daemon=True).start()
+        return True
+    except OSError:
+        return False
+
+
+def tile_side_by_side():
+    """Put the terminal on the left 70 % and Firefox on the right 30 %, once both windows
+    exist (up to 30 s). Best effort: if anything is missing, the windows stay as opened."""
+    # Not GTK (this runs in a thread): the work area from the window manager, which also
+    # leaves out the bottom panel. "0  * DG: ...  VP: 0,0  WA: 0,0 1920x1040  Workspace 1"
+    area = None
+    for _ in range(20):
+        try:
+            d = subprocess.run(["wmctrl", "-d"], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        m = re.search(r"^\S+\s+\*.*WA: (\d+),(\d+) (\d+)x(\d+)", d, re.M)
+        if m:
+            area = [int(v) for v in m.groups()]
+            break
+        time.sleep(0.5)
+    if not area:
+        return
+    ax, ay, aw, ah = area
+    left = aw * 7 // 10                      # the agent's terminal gets 70 %, Firefox 30 %
+    want = {"gnome-terminal": (ax, left), "firefox": (ax + left, aw - left)}
+    done = set()
+    for _ in range(60):
+        try:
+            out = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True,
+                                 timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        for line in out.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) < 3:
+                continue
+            wid, wclass = parts[0], parts[2].lower()
+            for key, (x, w) in want.items():
+                if key in wclass and key not in done:
+                    subprocess.run(["wmctrl", "-i", "-r", wid, "-b",
+                                    "remove,maximized_vert,maximized_horz"], timeout=5)
+                    subprocess.run(["wmctrl", "-i", "-r", wid, "-e",
+                                    "0,%d,%d,%d,%d" % (x, ay, w, ah)], timeout=5)
+                    done.add(key)
+        if len(done) == len(want):
+            return
+        time.sleep(0.5)
+
+
+def apply_terminal_profile():
+    """Load the skeleton's gnome-terminal profile once per fresh home."""
+    marker = os.path.join(HOME, ".cache", "hackbox", "terminal-profile-applied")
+    if os.path.exists(marker) or not os.path.exists(TERMINAL_PROFILE) or not shutil.which("dconf"):
+        return
+    try:
+        with open(TERMINAL_PROFILE, "rb") as f:
+            subprocess.run(["dconf", "load", TERMINAL_PROFILE_PATH], stdin=f,
+                           timeout=10, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        open(marker, "w").close()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+# ---------------------------------------------------------------- style ---
+
+CSS_TEMPLATE = """
+/* 0G Dev Day: deep indigo to violet, a pink glow from the lower left, white type. */
+.hb-full { background-color: #1b1443;
+  background-image:
+    radial-gradient(circle farthest-side at 0% 100%, rgba(255,205,230,0.95), rgba(214,150,214,0.55) 35%, rgba(120,90,210,0.0) 70%),
+    radial-gradient(circle farthest-side at 100% 0%, rgba(20,14,52,0.95), rgba(20,14,52,0.0) 70%),
+    linear-gradient(160deg, #1d1650 0%, #2f2479 40%, #5a43b4 75%, #8f6fd0 100%); }
+.hb-full label, .hb-full entry, .hb-full button { font-family: "Ubuntu", "Cantarell", sans-serif; }
+.hb-full label { color: #ffffff; }
+.hb-event  { font-size: {event}px; font-weight: 800; letter-spacing: -1px; }
+.hb-line   { font-size: {line}px; font-family: "Ubuntu Mono", monospace; letter-spacing: 6px;
+             color: rgba(255,255,255,0.92); }
+.hb-rulebar { background-color: rgba(255,255,255,0.55); min-height: 1px; }
+.hb-title  { font-size: {title}px; font-weight: 700; }
+.hb-body   { font-size: {body}px; color: rgba(255,255,255,0.92); }
+.hb-muted  { font-size: {small}px; color: rgba(255,255,255,0.68); }
+.hb-tiny   { font-size: {tiny}px; color: rgba(255,255,255,0.55); letter-spacing: 2px;
+             font-family: "Ubuntu Mono", monospace; }
+.hb-card   { background-color: rgba(18,12,48,0.42); border: 1px solid rgba(255,255,255,0.22);
+             border-radius: 28px; padding: {cardpad}px; }
+.hb-flabel { font-size: {small}px; font-weight: 600; color: rgba(255,255,255,0.85);
+             letter-spacing: 1px; }
+.hb-name   { font-size: {body}px; padding: {fpad_v}px {fpad_h}px; border-radius: 14px;
+             background-image: none; background-color: rgba(255,255,255,0.10); color: #ffffff;
+             border: 1px solid rgba(255,255,255,0.30); caret-color: #ffffff;
+             box-shadow: none; }
+.hb-name:focus { border-color: #ffffff; background-color: rgba(255,255,255,0.16); }
+.hb-start  { font-size: {button}px; font-weight: 700; padding: {bpad_v}px {bpad_h}px;
+             border-radius: 999px; background-image: none; background-color: #ffffff;
+             border: none; box-shadow: none; }
+.hb-start label { color: #2a1d6e; }
+.hb-start:hover { background-color: #efe8ff; }
+.hb-start:disabled { background-color: rgba(255,255,255,0.18); }
+.hb-start:disabled label { color: rgba(255,255,255,0.55); }
+.hb-note   { font-size: {small}px; font-weight: 500; }
+.hb-start .hb-note { color: #6a55c8; }
+.hb-start:disabled .hb-note { color: rgba(255,255,255,0.5); }
+.hb-error  { font-size: {small}px; color: #ffd0e6; }
+.hb-chip   { font-size: {chip}px; font-weight: 600; padding: {chip_v}px {chip_h}px; border-radius: 999px;
+             background-image: none; background-color: rgba(255,255,255,0.10); color: #ffffff;
+             border: 1px solid rgba(255,255,255,0.30); box-shadow: none; }
+.hb-chip label { color: #ffffff; }
+.hb-chip:hover { background-color: rgba(255,255,255,0.18); }
+.hb-chip:checked { background-color: #ffffff; border-color: #ffffff; }
+.hb-chip:checked label { color: #2a1d6e; }
+.hb-code   { font-size: {code}px; font-weight: 700; font-family: "Ubuntu Mono", monospace;
+             letter-spacing: 10px; color: #ffffff; }
+.hb-url    { font-size: {small}px; font-family: "Ubuntu Mono", monospace; color: rgba(255,255,255,0.8); }
+.hb-qr     { background-color: #ffffff; border-radius: 22px; padding: {qrpad}px; }
+.hb-pill   { background-color: rgba(22,15,58,0.92); border-radius: 999px;
+             border: 1px solid rgba(255,255,255,0.28); }
+.hb-pill label { color: #ffffff; font-family: "Ubuntu Mono", monospace; font-weight: bold;
+                 font-size: {pill}px; padding: 2px 10px; }
+.hb-pill.warn { border-color: #ffc46b; }
+.hb-pill.warn label { color: #ffd89a; }
+.hb-pill.crit { border-color: #ff7aa8; background-color: rgba(90,16,52,0.95); }
+.hb-pill.crit label { color: #ffc2d8; }
+.hb-endbtn { font-size: {pillbtn}px; padding: 2px 12px; border-radius: 999px; background-image: none;
+             background-color: rgba(255,255,255,0.12); color: #ffffff; border: 1px solid rgba(255,255,255,0.25); }
+.hb-endbtn label { color: #ffffff; font-family: inherit; }
+.hb-endbtn:disabled { background-color: rgba(255,255,255,0.05); }
+.hb-endbtn:disabled label { color: rgba(255,255,255,0.45); }
+.hb-ask    { color: rgba(255,255,255,0.7); font-size: {pillbtn}px; padding: 0 6px; }
+.hb-toast  { background-color: rgba(30,20,80,0.96); border: 2px solid #ffc46b; border-radius: 22px; }
+.hb-toast.crit { background-color: rgba(90,16,52,0.96); border-color: #ff7aa8; }
+.hb-toast label { color: #ffffff; font-size: {toast}px; font-weight: bold; }
+"""
+
+
+def scale_factor():
+    """Type grows with the primary monitor's logical height, so a 4K screen
+    at scale 1 gets the same physical size as 1080p (at scale 2 GTK already
+    doubles everything and this stays 1)."""
+    display = Gdk.Display.get_default()
+    mon = display.get_primary_monitor() or display.get_monitor(0)
+    if mon is None:
+        return 1.0
+    h = mon.get_geometry().height
+    return max(0.8, min(3.0, h / 1080.0))
+
+
+def install_css(provider):
+    f = scale_factor()
+    sizes = {"event": 70, "line": 22, "title": 34, "body": 21, "small": 16, "tiny": 12,
+             "code": 64, "button": 21, "bpad_v": 13, "bpad_h": 30, "pill": 22, "pillbtn": 15,
+             "toast": 30, "cardpad": 28, "fpad_v": 10, "fpad_h": 16, "qrpad": 14,
+             "chip": 15, "chip_v": 6, "chip_h": 12}
+    css = CSS_TEMPLATE
+    for key, px in sizes.items():
+        css = css.replace("{" + key + "}", str(int(round(px * f))))
+    try:
+        provider.load_from_data(css.encode())
+    except GLib.Error:
+        # A property this GTK does not know must not take the overlay down.
+        css = "\n".join(l for l in css.split("\n") if "letter-spacing" not in l)
+        try:
+            provider.load_from_data(css.encode())
+        except GLib.Error:
+            pass
+
+
+def primary_geometry():
+    display = Gdk.Display.get_default()
+    mon = display.get_primary_monitor() or display.get_monitor(0)
+    return mon.get_geometry()
+
+
+def label(text="", css=None, wrap=False, xalign=0.5):
+    w = Gtk.Label(label=text)
+    w.set_xalign(xalign)
+    w.set_justify(Gtk.Justification.CENTER)
+    if wrap:
+        w.set_line_wrap(True)
+        w.set_max_width_chars(70)
+    if css:
+        w.get_style_context().add_class(css)
+    return w
+
+
+# The 0G mark, drawn as SVG (a ring with a slash, and a G), white on the gradient.
+LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 232 108">
+<g fill="none" stroke="#ffffff" stroke-width="21">
+<circle cx="50" cy="50" r="39.5"/>
+<path d="M 189.4 24.6 A 39.5 39.5 0 1 0 199.5 50"/>
+</g>
+<path d="M 160 50 H 210" stroke="#ffffff" stroke-width="21"/>
+<path d="M 26 78 L 58 42" stroke="#ffffff" stroke-width="13" stroke-linecap="butt"/>
+</svg>"""
+
+
+# Marina Bay, very faint along the bottom, seen from the west bank: the Merlion and its jet, the
+# Singapore Flyer, the CBD towers (behind the content card), the ArtScience Museum lotus, Marina
+# Bay Sands with the SkyPark's cantilevered bow, the Gardens by the Bay domes and Supertrees with
+# the OCBC Skyway, all mirrored faintly in the water. White on the gradient, watermark opacity.
+SKYLINE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 300">
+<defs>
+<linearGradient id="fade" gradientUnits="userSpaceOnUse" x1="0" y1="40" x2="0" y2="268">
+<stop offset="0" stop-color="#ffffff" stop-opacity="0.42"/><stop offset="0.55" stop-color="#ffffff" stop-opacity="0.85"/><stop offset="1" stop-color="#ffffff" stop-opacity="1"/></linearGradient>
+<linearGradient id="refl" gradientUnits="userSpaceOnUse" x1="0" y1="268" x2="0" y2="168">
+<stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+<linearGradient id="water" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="2000" y2="0">
+<stop offset="0" stop-color="#ffffff" stop-opacity="0"/><stop offset="0.14" stop-color="#ffffff" stop-opacity="0.05"/><stop offset="0.86" stop-color="#ffffff" stop-opacity="0.05"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+<linearGradient id="line" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="2000" y2="0">
+<stop offset="0" stop-color="#ffffff" stop-opacity="0"/><stop offset="0.14" stop-color="#ffffff" stop-opacity="0.11"/><stop offset="0.86" stop-color="#ffffff" stop-opacity="0.11"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+</defs>
+<g fill="url(#fade)" stroke="#ffffff">
+<g fill-opacity="0.028" stroke="none">
+<rect x="96" y="196" width="26" height="72"/>
+<rect x="130" y="178" width="22" height="90"/>
+<rect x="316" y="190" width="26" height="78"/>
+<rect x="350" y="206" width="20" height="62"/>
+<rect x="600" y="140" width="30" height="128"/>
+<rect x="640" y="92" width="36" height="176"/>
+<rect x="645" y="86" width="26" height="6"/>
+<rect x="686" y="118" width="28" height="150"/>
+<rect x="722" y="84" width="42" height="184"/>
+<rect x="728" y="77" width="30" height="7"/>
+<rect x="772" y="150" width="24" height="118"/>
+<rect x="804" y="100" width="34" height="168"/>
+<rect x="846" y="128" width="30" height="140"/>
+<rect x="884" y="78" width="40" height="190"/>
+<rect x="932" y="160" width="26" height="108"/>
+<rect x="966" y="110" width="36" height="158"/>
+<rect x="1010" y="136" width="30" height="132"/>
+<rect x="1048" y="96" width="44" height="172"/>
+<rect x="1100" y="150" width="28" height="118"/>
+<rect x="1136" y="120" width="38" height="148"/>
+<rect x="1182" y="162" width="32" height="106"/>
+<rect x="1222" y="140" width="26" height="128"/>
+<rect x="1256" y="108" width="40" height="160"/>
+<rect x="1300" y="124" width="34" height="144"/>
+<rect x="1342" y="104" width="30" height="164"/>
+<rect x="1382" y="132" width="40" height="136"/>
+</g>
+<path fill-opacity="0.04" stroke="none" d="M937 160 L945 128 L953 160 Z"/>
+<rect x="0" y="268" width="2000" height="32" fill="url(#water)" stroke="none"/>
+<path stroke="url(#line)" stroke-width="1" d="M0 268.5 H2000"/>
+<g opacity="0.11" stroke="none">
+<rect x="184" y="254" width="132" height="14"/>
+<path d="M 196 254 Q 199 241 212 237 Q 224 232 232 240 Q 243 232 255 238 Q 266 231 278 238 Q 292 234 304 254 Z"/>
+<path transform="matrix(0.0394 0 0 -0.0394 220 247.96)" d="M857 3380 c-9 -11 -27 -20 -40 -20 -13 0 -48 -8 -78 -17 -37 -11 -92 -17 -179 -17 l-125 -1 -1 -53 c-1 -51 -3 -55 -56 -102 -109 -97 -143 -175 -183 -415 -14 -88 -35 -185 -45 -216 -25 -70 -26 -64 13 -86 17 -11 42 -37 53 -59 l22 -39 -24 -115 c-13 -63 -37 -149 -54 -190 -18 -41 -40 -98 -50 -126 l-18 -52 38 -24 c21 -14 49 -28 63 -32 14 -3 28 -15 32 -25 10 -33 -55 -270 -101 -370 -51 -108 -52 -102 27 -137 72 -33 85 -51 66 -96 -8 -18 -12 -39 -9 -47 2 -7 -1 -31 -9 -53 -10 -31 -10 -47 -1 -70 8 -22 8 -36 1 -51 -11 -20 -13 -112 -4 -232 7 -95 8 -130 2 -200 -3 -41 0 -66 9 -79 9 -14 10 -24 3 -38 -7 -14 -6 -31 6 -62 18 -48 14 -64 -28 -110 -12 -13 -28 -32 -36 -41 -12 -15 -25 -17 -83 -11 l-68 6 0 -44 c0 -41 2 -44 31 -50 17 -3 395 -6 840 -6 802 0 809 0 809 20 0 11 -4 20 -8 20 -26 0 -43 30 -48 79 -7 74 12 118 49 112 4 0 7 17 7 39 0 37 -2 40 -19 30 -27 -14 -51 12 -50 53 0 18 -3 46 -6 63 -5 24 -1 37 18 60 18 21 25 40 23 65 -1 18 6 50 16 69 10 19 18 55 18 80 0 45 0 45 -34 45 -23 0 -42 -8 -56 -23 -25 -26 -24 -26 -43 -7 -37 36 -29 302 13 454 34 120 126 312 216 448 93 140 97 152 55 194 -38 37 -88 39 -153 4 -26 -14 -53 -22 -62 -19 -20 8 -46 76 -46 122 0 20 -4 53 -9 72 -23 87 -21 122 6 144 77 63 99 113 69 157 -70 109 -55 130 89 124 l105 -5 0 30 c0 26 -3 30 -29 30 -53 0 -64 23 -35 77 16 32 24 61 23 92 -1 25 6 63 15 83 49 113 10 143 -261 203 -14 3 -25 15 -29 30 -6 26 -72 78 -143 114 -22 12 -47 34 -56 50 -30 59 -192 151 -265 151 -11 0 -28 9 -37 20 -14 16 -30 20 -78 20 -48 0 -64 -4 -78 -20z m364 -2760 c43 -24 64 -113 33 -144 -19 -20 -29 -20 -62 -2 -15 8 -39 17 -54 20 -54 12 -41 83 21 116 43 23 38 22 62 10z"/>
+</g>
+<path fill="none" stroke-opacity="0.11" stroke-width="2.6" stroke-linecap="round" d="M 284 148 C 316 142 354 196 372 266"/>
+<path fill="none" stroke-opacity="0.05" stroke-width="1" d="M 358 267 q 7 -5 14 0 M 368 264 q 6 -4 12 0"/>
+<g transform="translate(0,0)">
+<rect fill-opacity="0.07" stroke="none" x="395" y="248" width="170" height="20" rx="2"/>
+<rect fill-opacity="0.04" stroke="none" x="420" y="240" width="120" height="8" rx="2"/>
+<path fill="none" stroke="url(#fade)" stroke-opacity="0.12" stroke-width="4" stroke-linecap="round" d="M480 160 L436 248 M480 160 L524 248"/>
+<path fill="none" stroke-opacity="0.07" stroke-width="1.4" d="M456 210 L504 210"/>
+<circle fill="none" stroke="url(#fade)" stroke-opacity="0.15" stroke-width="2.6" cx="480" cy="160" r="86"/>
+<circle fill="none" stroke="url(#fade)" stroke-opacity="0.08" stroke-width="1.2" cx="480" cy="160" r="80"/>
+<path fill="none" stroke="url(#fade)" stroke-opacity="0.06" stroke-width="0.9" d="M489 160 L560 160 M488.8 162 L558 177.8 M488.1 163.9 L552.1 194.7 M487 165.6 L542.5 209.9 M485.6 167 L529.9 222.5 M483.9 168.1 L514.7 232.1 M482 168.8 L497.8 238 M480 169 L480 240 M478 168.8 L462.2 238 M476.1 168.1 L445.3 232.1 M474.4 167 L430.1 222.5 M473 165.6 L417.5 209.9 M471.9 163.9 L407.9 194.7 M471.2 162 L402 177.8 M471 160 L400 160 M471.2 158 L402 142.2 M471.9 156.1 L407.9 125.3 M473 154.4 L417.5 110.1 M474.4 153 L430.1 97.5 M476.1 151.9 L445.3 87.9 M478 151.2 L462.2 82 M480 151 L480 80 M482 151.2 L497.8 82 M483.9 151.9 L514.7 87.9 M485.6 153 L529.9 97.5 M487 154.4 L542.5 110.1 M488.1 156.1 L552.1 125.3 M488.8 158 L558 142.2"/>
+<circle fill="none" stroke="url(#fade)" stroke-opacity="0.13" stroke-width="2" cx="480" cy="160" r="9"/>
+<g fill-opacity="0.13" stroke="none"><rect x="566" y="157.7" width="6.4" height="4.6" rx="2.2" transform="rotate(90 569.2 160)"/><rect x="563.8" y="177.5" width="6.4" height="4.6" rx="2.2" transform="rotate(102.9 567 179.8)"/><rect x="557.2" y="196.4" width="6.4" height="4.6" rx="2.2" transform="rotate(115.7 560.4 198.7)"/><rect x="546.5" y="213.3" width="6.4" height="4.6" rx="2.2" transform="rotate(128.6 549.7 215.6)"/><rect x="532.4" y="227.4" width="6.4" height="4.6" rx="2.2" transform="rotate(141.4 535.6 229.7)"/><rect x="515.5" y="238.1" width="6.4" height="4.6" rx="2.2" transform="rotate(154.3 518.7 240.4)"/><rect x="496.6" y="244.7" width="6.4" height="4.6" rx="2.2" transform="rotate(167.1 499.8 247)"/><rect x="476.8" y="246.9" width="6.4" height="4.6" rx="2.2" transform="rotate(180 480 249.2)"/><rect x="457" y="244.7" width="6.4" height="4.6" rx="2.2" transform="rotate(192.9 460.2 247)"/><rect x="438.1" y="238.1" width="6.4" height="4.6" rx="2.2" transform="rotate(205.7 441.3 240.4)"/><rect x="421.2" y="227.4" width="6.4" height="4.6" rx="2.2" transform="rotate(218.6 424.4 229.7)"/><rect x="407.1" y="213.3" width="6.4" height="4.6" rx="2.2" transform="rotate(231.4 410.3 215.6)"/><rect x="396.4" y="196.4" width="6.4" height="4.6" rx="2.2" transform="rotate(244.3 399.6 198.7)"/><rect x="389.8" y="177.5" width="6.4" height="4.6" rx="2.2" transform="rotate(257.1 393 179.8)"/><rect x="387.6" y="157.7" width="6.4" height="4.6" rx="2.2" transform="rotate(270 390.8 160)"/><rect x="389.8" y="137.9" width="6.4" height="4.6" rx="2.2" transform="rotate(282.9 393 140.2)"/><rect x="396.4" y="119" width="6.4" height="4.6" rx="2.2" transform="rotate(295.7 399.6 121.3)"/><rect x="407.1" y="102.1" width="6.4" height="4.6" rx="2.2" transform="rotate(308.6 410.3 104.4)"/><rect x="421.2" y="88" width="6.4" height="4.6" rx="2.2" transform="rotate(321.4 424.4 90.3)"/><rect x="438.1" y="77.3" width="6.4" height="4.6" rx="2.2" transform="rotate(334.3 441.3 79.6)"/><rect x="457" y="70.7" width="6.4" height="4.6" rx="2.2" transform="rotate(347.1 460.2 73)"/><rect x="476.8" y="68.5" width="6.4" height="4.6" rx="2.2" transform="rotate(360 480 70.8)"/><rect x="496.6" y="70.7" width="6.4" height="4.6" rx="2.2" transform="rotate(372.9 499.8 73)"/><rect x="515.5" y="77.3" width="6.4" height="4.6" rx="2.2" transform="rotate(385.7 518.7 79.6)"/><rect x="532.4" y="88" width="6.4" height="4.6" rx="2.2" transform="rotate(398.6 535.6 90.3)"/><rect x="546.5" y="102.1" width="6.4" height="4.6" rx="2.2" transform="rotate(411.4 549.7 104.4)"/><rect x="557.2" y="119" width="6.4" height="4.6" rx="2.2" transform="rotate(424.3 560.4 121.3)"/><rect x="563.8" y="137.9" width="6.4" height="4.6" rx="2.2" transform="rotate(437.1 567 140.2)"/></g>
+</g>
+<g fill-opacity="0.085" stroke="none">
+<path d="M1342 268 C1342 246 1402 246 1402 268 L1342 268 Z"/>
+<path fill-opacity="0.08" d="M1372 252 Q1350.3 245.2 1340.2 235.1 Q1354.3 237.8 1372 252 Z M1372 252 Q1348.7 233 1339.9 216.3 Q1355.5 226.8 1372 252 Z M1372 252 Q1352.8 221.2 1348.4 199 Q1361.9 217.1 1372 252 Z M1372 252 Q1362 213.2 1364.2 188.5 Q1372.3 212 1372 252 Z M1372 252 Q1373.6 213.2 1382.8 190.9 Q1383.8 215 1372 252 Z M1372 252 Q1383.5 220.2 1397.4 204.3 Q1392 224.7 1372 252 Z M1372 252 Q1388.6 229.9 1403.7 221.4 Q1394.7 236.2 1372 252 Z M1372 252 Q1389.2 239.2 1402.6 237.1 Q1392.7 246.4 1372 252 Z"/>
+</g>
+<g fill-opacity="0.115" stroke="none">
+<path fill-opacity="0.03" d="M1424 268 C1430 242 1690 242 1700 268 L1424 268 Z"/>
+<path d="M1444 112 L1496 112 L1496 268 C1432 268 1438 223 1444 173 L1444 112 Z"/>
+<path d="M1522 112 L1574 112 L1574 268 C1510 268 1516 223 1522 173 L1522 112 Z"/>
+<path d="M1600 112 L1652 112 L1652 268 C1588 268 1594 223 1600 173 L1600 112 Z"/>
+<path fill-opacity="0.125" d="M1394 103 C1408 101 1424 100 1444 100 L1654 100 Q1662 100 1662 106 Q1662 112 1654 112 L1438 112 C1424 111 1406 108 1394 103 Z"/>
+<path fill-opacity="0.05" d="M1442 112 L1652 112 L1652 114.5 L1446 114.5 Z"/>
+<g fill-opacity="0.05"><circle cx="1458" cy="99.2" r="1.4"/><circle cx="1469" cy="98" r="2.6"/><circle cx="1480" cy="98.4" r="2.2"/><circle cx="1491" cy="98.8" r="1.8"/><circle cx="1502" cy="99.2" r="1.4"/><circle cx="1513" cy="98" r="2.6"/><circle cx="1524" cy="98.4" r="2.2"/><circle cx="1535" cy="98.8" r="1.8"/><circle cx="1546" cy="99.2" r="1.4"/><circle cx="1557" cy="98" r="2.6"/><circle cx="1568" cy="98.4" r="2.2"/><circle cx="1579" cy="98.8" r="1.8"/><circle cx="1590" cy="99.2" r="1.4"/><circle cx="1601" cy="98" r="2.6"/><circle cx="1612" cy="98.4" r="2.2"/><circle cx="1623" cy="98.8" r="1.8"/><circle cx="1634" cy="99.2" r="1.4"/></g>
+</g>
+<g fill-opacity="0.03" stroke="none"><path d="M1696 268 C1702 234 1738 212 1776 210 C1812 210 1838 242 1844 268 Z"/><path d="M1848 268 C1850 218 1874 196 1898 196 C1922 196 1940 234 1942 268 Z"/></g>
+<g fill="none" stroke="url(#fade)" stroke-opacity="0.035" stroke-width="0.8">
+<path d="M1696 268 C1702 234 1738 212 1776 210 C1812 210 1838 242 1844 268 Z"/><path d="M1848 268 C1850 218 1874 196 1898 196 C1922 196 1940 234 1942 268 Z"/>
+<path d="M1698 266 Q1718 252 1726 268 M1698 266 Q1736 238 1756 268 M1698 266 Q1754 224 1786 268 M1698 266 Q1772 210 1816 268 M1871.5 268 C1865 196 1893 194 1898 197 M1895 268 C1880 196 1898 194 1898 197 M1918.5 268 C1895 196 1903 194 1898 197"/>
+</g>
+<g fill-opacity="0.085" stroke-opacity="0.105">
+<path d="M1760.5 268 L1762.4 180 L1769.6 180 L1771.5 268 Z"/>
+<path fill-opacity="0.3" d="M1762.4 182 C1760.4 163.9 1752.8 159.5 1742 154 L1790 154 C1779.2 159.5 1771.6 163.9 1769.6 182 Z"/>
+<path fill="none" stroke="url(#fade)" stroke-width="1.1" stroke-linecap="round" d="M1763.8 178 Q1757.6 166.1 1742 154 L1739.1 151 M1764.6 178 Q1760.4 166.1 1750 154 L1748.1 149.7 M1765.3 178 Q1763.2 166.1 1758 154 L1757 148.3 M1766 178 Q1766 166.1 1766 154 L1766 147 M1766.7 178 Q1768.8 166.1 1774 154 L1775 148.3 M1767.4 178 Q1771.6 166.1 1782 154 L1783.9 149.7 M1768.2 178 Q1774.4 166.1 1790 154 L1792.9 151"/>
+<ellipse fill="none" stroke="url(#fade)" stroke-width="1.6" cx="1766" cy="154" rx="24" ry="3.1"/>
+<path d="M1802.5 268 L1804.4 130 L1811.6 130 L1813.5 268 Z"/>
+<path fill-opacity="0.3" d="M1804.4 132 C1802.4 109.5 1789.3 103.5 1774 96 L1842 96 C1826.7 103.5 1813.6 109.5 1811.6 132 Z"/>
+<path fill="none" stroke="url(#fade)" stroke-width="1.1" stroke-linecap="round" d="M1805.8 128 Q1796.1 112.5 1774 96 L1769.9 93 M1806.6 128 Q1800.1 112.5 1785.3 96 L1782.6 91.7 M1807.3 128 Q1804 112.5 1796.7 96 L1795.3 90.3 M1808 128 Q1808 112.5 1808 96 L1808 89 M1808.7 128 Q1812 112.5 1819.3 96 L1820.7 90.3 M1809.4 128 Q1815.9 112.5 1830.7 96 L1833.4 91.7 M1810.2 128 Q1819.9 112.5 1842 96 L1846.1 93"/>
+<ellipse fill="none" stroke="url(#fade)" stroke-width="1.6" cx="1808" cy="96" rx="34" ry="4.4"/>
+<path d="M1842.5 268 L1844.4 196 L1851.6 196 L1853.5 268 Z"/>
+<path fill-opacity="0.3" d="M1844.4 198 C1842.4 181.6 1837 177.8 1828 173 L1868 173 C1859 177.8 1853.6 181.6 1851.6 198 Z"/>
+<path fill="none" stroke="url(#fade)" stroke-width="1.1" stroke-linecap="round" d="M1845.8 194 Q1841 183.4 1828 173 L1825.6 170 M1846.6 194 Q1843.3 183.4 1834.7 173 L1833.1 168.7 M1847.3 194 Q1845.7 183.4 1841.3 173 L1840.5 167.3 M1848 194 Q1848 183.4 1848 173 L1848 166 M1848.7 194 Q1850.3 183.4 1854.7 173 L1855.5 167.3 M1849.4 194 Q1852.7 183.4 1861.3 173 L1862.9 168.7 M1850.2 194 Q1855 183.4 1868 173 L1870.4 170"/>
+<ellipse fill="none" stroke="url(#fade)" stroke-width="1.6" cx="1848" cy="173" rx="20" ry="2.6"/>
+<path d="M1878.5 268 L1880.4 160 L1887.6 160 L1889.5 268 Z"/>
+<path fill-opacity="0.3" d="M1880.4 162 C1878.4 141.7 1868.6 136.5 1856 130 L1912 130 C1899.4 136.5 1889.6 141.7 1887.6 162 Z"/>
+<path fill="none" stroke="url(#fade)" stroke-width="1.1" stroke-linecap="round" d="M1881.8 158 Q1874.2 144.3 1856 130 L1852.6 127 M1882.6 158 Q1877.5 144.3 1865.3 130 L1863.1 125.7 M1883.3 158 Q1880.7 144.3 1874.7 130 L1873.5 124.3 M1884 158 Q1884 144.3 1884 130 L1884 123 M1884.7 158 Q1887.3 144.3 1893.3 130 L1894.5 124.3 M1885.4 158 Q1890.5 144.3 1902.7 130 L1904.9 125.7 M1886.2 158 Q1893.8 144.3 1912 130 L1915.4 127"/>
+<ellipse fill="none" stroke="url(#fade)" stroke-width="1.6" cx="1884" cy="130" rx="28" ry="3.6"/>
+<path d="M1920.5 268 L1922.4 122 L1929.6 122 L1931.5 268 Z"/>
+<path fill-opacity="0.3" d="M1922.4 124 C1920.4 100.4 1906.2 94 1890 86 L1962 86 C1945.8 94 1931.6 100.4 1929.6 124 Z"/>
+<path fill="none" stroke="url(#fade)" stroke-width="1.1" stroke-linecap="round" d="M1923.8 120 Q1913.4 103.6 1890 86 L1885.7 83 M1924.6 120 Q1917.6 103.6 1902 86 L1899.1 81.7 M1925.3 120 Q1921.8 103.6 1914 86 L1912.6 80.3 M1926 120 Q1926 103.6 1926 86 L1926 79 M1926.7 120 Q1930.2 103.6 1938 86 L1939.4 80.3 M1927.4 120 Q1934.4 103.6 1950 86 L1952.9 81.7 M1928.2 120 Q1938.6 103.6 1962 86 L1966.3 83"/>
+<ellipse fill="none" stroke="url(#fade)" stroke-width="1.6" cx="1926" cy="86" rx="36" ry="4.7"/>
+<path d="M1962.5 268 L1964.4 176 L1971.6 176 L1973.5 268 Z"/>
+<path fill-opacity="0.3" d="M1964.4 178 C1962.4 159.9 1954.8 155.5 1944 150 L1992 150 C1981.2 155.5 1973.6 159.9 1971.6 178 Z"/>
+<path fill="none" stroke="url(#fade)" stroke-width="1.1" stroke-linecap="round" d="M1965.8 174 Q1959.6 162.1 1944 150 L1941.1 147 M1966.6 174 Q1962.4 162.1 1952 150 L1950.1 145.7 M1967.3 174 Q1965.2 162.1 1960 150 L1959 144.3 M1968 174 Q1968 162.1 1968 150 L1968 143 M1968.7 174 Q1970.8 162.1 1976 150 L1977 144.3 M1969.4 174 Q1973.6 162.1 1984 150 L1985.9 145.7 M1970.2 174 Q1976.4 162.1 1992 150 L1994.9 147"/>
+<ellipse fill="none" stroke="url(#fade)" stroke-width="1.6" cx="1968" cy="150" rx="24" ry="3.1"/>
+<path fill="none" stroke="url(#fade)" stroke-width="2.4" d="M1812 202 Q1867 206 1922 202"/>
+<path fill="none" stroke="url(#fade)" stroke-opacity="0.6" stroke-width="0.9" d="M1812 197 Q1867 201 1922 197"/>
+<path fill="none" stroke="url(#fade)" stroke-opacity="0.5" stroke-width="0.7" d="M1824 198.1 L1824 202.9 M1838 198.7 L1838 203.5 M1852 199.1 L1852 203.9 M1866 199.2 L1866 204 M1880 199.1 L1880 203.9 M1894 198.8 L1894 203.6 M1908 198.2 L1908 203"/>
+</g>
+<g fill="url(#refl)" stroke="none" transform="matrix(1 0 0 -0.3 0 348.4)">
+<g fill-opacity="0.07">
+<path d="M1432 268 L1496 268 L1496 112 L1444 112 Z"/>
+<path d="M1510 268 L1574 268 L1574 112 L1522 112 Z"/>
+<path d="M1588 268 L1652 268 L1652 112 L1600 112 Z"/>
+<rect x="1434" y="100" width="228" height="20"/>
+<rect x="1761.5" y="176" width="9" height="92"/>
+<rect x="1803.5" y="126" width="9" height="142"/>
+<rect x="1843.5" y="192" width="9" height="76"/>
+<rect x="1879.5" y="156" width="9" height="112"/>
+<rect x="1921.5" y="118" width="9" height="150"/>
+<rect x="1963.5" y="172" width="9" height="96"/>
+<circle cx="480" cy="160" r="86" fill="none" stroke="url(#refl)" stroke-opacity="0.09" stroke-width="3"/>
+<rect x="172" y="238" width="142" height="30"/>
+</g>
+</g>
+</g>
+</svg>"""
+
+
+def svg_image(svg, width, height):
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.set_size(int(width), int(height))
+        loader.write(svg.encode())
+        loader.close()
+        return Gtk.Image.new_from_pixbuf(loader.get_pixbuf())
+    except GLib.Error:
+        return Gtk.Box()                     # no SVG loader: no skyline
+
+
+def skyline():
+    """The skyline strip for the bottom of a full-screen face: 28 % of the height, never
+    wider than the screen (a wider image would push the window past it)."""
+    geo = primary_geometry()
+    h = min(int(geo.height * 0.28), int(geo.width * 300 / 2000))
+    img = svg_image(SKYLINE_SVG, h * 2000 / 300, h)
+    img.set_valign(Gtk.Align.END)
+    img.set_halign(Gtk.Align.CENTER)
+    return img
+
+
+def svg_pixbuf(svg, width, height):
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.set_size(int(width), int(height))
+        loader.write(svg.encode())
+        loader.close()
+        return loader.get_pixbuf()
+    except GLib.Error:
+        return None
+
+
+def xml_text(s):
+    return GLib.markup_escape_text(s or "")
+
+
+# The welcome face's two side pieces, drawn tilted into the empty space beside the card: a
+# reward ticket (left) and a rectangular Hacker Zone passport stamp (right). Each SVG holds its
+# own rotation, so GTK only places and animates a flat image.
+def ticket_svg(reward):
+    m = re.match(r"\s*(\$?[\d.,]+\S*)\s+(.*)$", reward or "")
+    big, rest = (m.group(1), m.group(2)) if m else (reward, "")
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 420">
+<defs>
+<linearGradient id="tk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f1e9ff"/></linearGradient>
+<mask id="notch"><rect x="0" y="0" width="400" height="300" fill="#fff"/><circle cx="0" cy="206" r="16" fill="#000"/><circle cx="400" cy="206" r="16" fill="#000"/></mask>
+<filter id="sh" x="-20%%" y="-20%%" width="140%%" height="150%%"><feGaussianBlur in="SourceAlpha" stdDeviation="12"/><feOffset dy="16"/><feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<g transform="translate(250 210) rotate(-9) translate(-200 -150)" filter="url(#sh)">
+<g mask="url(#notch)">
+<rect x="0" y="0" width="400" height="300" rx="22" fill="url(#tk)"/>
+<text x="32" y="52" font-family="Ubuntu Mono, monospace" font-weight="700" font-size="15" letter-spacing="4" fill="#6a55c8">EARN 0G</text>
+<text x="30" y="140" font-family="Ubuntu, sans-serif" fill="#2a1d6e"><tspan font-size="88" font-weight="800" letter-spacing="-3">%s</tspan><tspan font-size="30" font-weight="700" dx="10">free</tspan></text>
+<text x="32" y="180" font-family="Ubuntu, sans-serif" font-size="22" font-weight="700" fill="#2a1d6e">%s</text>
+<line x1="0" y1="206" x2="400" y2="206" stroke="#6a55c8" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="8 6"/>
+<text font-family="Ubuntu, sans-serif" font-size="17" fill="#4b3a9a"><tspan x="32" y="246">When time is up, scan the QR to download</tspan><tspan x="32" y="270">your project and claim it.</tspan></text>
+</g>
+</g>
+</svg>""" % (xml_text(big), xml_text(rest))
+
+
+def stamp_svg(conf):
+    line = conf.get("EVENT_LINE") or ""
+    year = (re.findall(r"\d{4}", line) or [""])[-1]
+    city = line.replace(".", " ").split()[-1] if line.split() else ""
+    top = " . ".join(p for p in ("0G", conf.get("EVENT_TITLE") or "", year) if p)
+    ink = "#ff8cc0"
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 560">
+<defs>
+<filter id="grunge" x="-5%%" y="-5%%" width="110%%" height="110%%">
+<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7" result="n"/>
+<feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.1 1.75" result="holes"/>
+<feComposite in="SourceGraphic" in2="holes" operator="in" result="inked"/>
+<feTurbulence type="turbulence" baseFrequency="0.035" numOctaves="2" seed="3" result="w"/>
+<feDisplacementMap in="inked" in2="w" scale="2"/>
+</filter>
+</defs>
+<g transform="translate(280 280) rotate(8) translate(-220 -235)">
+<g filter="url(#grunge)" fill="none" stroke="{ink}">
+<rect x="3" y="3" width="434" height="324" rx="10" stroke-width="6"/>
+<rect x="17" y="17" width="406" height="296" rx="4" stroke-width="2"/>
+<g stroke="none" fill="{ink}" text-anchor="middle">
+<text x="220" y="62" font-family="Ubuntu Mono, monospace" font-weight="700" font-size="18" letter-spacing="7">{top}</text>
+<text x="220" y="142" font-family="Ubuntu, sans-serif" font-weight="700" font-size="74" letter-spacing="2">HACKER</text>
+<text x="220" y="214" font-family="Ubuntu, sans-serif" font-weight="700" font-size="74" letter-spacing="2">ZONE</text>
+<text x="220" y="250" font-family="Ubuntu Mono, monospace" font-weight="700" font-size="17" letter-spacing="4">{city}</text>
+<text x="224" y="292" font-family="Ubuntu Mono, monospace" font-weight="800" font-size="22" letter-spacing="8">BUILT</text>
+</g>
+<line x1="50" y1="244" x2="140" y2="244" stroke-width="2"/>
+<line x1="300" y1="244" x2="390" y2="244" stroke-width="2"/>
+<rect x="158" y="266" width="124" height="36" stroke-width="2"/>
+</g>
+<g transform="rotate(-10 220 400)" font-family="Ubuntu, sans-serif" font-size="21" fill="#ffffff" fill-opacity="0.92">
+<text x="24" y="378"><tspan font-weight="700" fill-opacity="1">Get stamped.</tspan> Show your build to staff</text>
+<text x="24" y="406">for the Hacker Zone stamp on your event</text>
+<text x="24" y="434">passport. Stamps count toward the final</text>
+<text x="24" y="462">prize.</text>
+</g>
+</g>
+</svg>""".replace("%%", "%").format(ink=ink, top=xml_text(top), city=xml_text(city))
+
+
+def ease_back(p):
+    """Ease out with a small overshoot, like CSS cubic-bezier(.2,1.3,.4,1)."""
+    c = 1.4
+    p -= 1
+    return 1 + (c + 1) * p * p * p + c * p * p
+
+
+class Art(Gtk.DrawingArea):
+    """A flat image with an entrance animation, drawn only while it is on screen.
+    'slide': slides in from the left, holds, fades, and replays every `every` seconds.
+    'thump': drops in from 1.9x scale once each time it is shown (a stamp landing)."""
+
+    def __init__(self, pixbuf, kind, delay=0.2, every=7.0):
+        super().__init__()
+        self.pix, self.kind, self.delay, self.every = pixbuf, kind, delay, every
+        self.pad = int(pixbuf.get_width() * 0.12) if kind == "slide" else 0
+        self.set_size_request(pixbuf.get_width() + self.pad, pixbuf.get_height())
+        self.t0, self.timer = None, None
+        self.connect("draw", self._draw)
+        self.connect("map", self._start)
+        self.connect("unmap", self._stop)
+
+    def _start(self, *_):
+        self.t0 = time.monotonic()
+        if self.timer is None:
+            self.timer = GLib.timeout_add(33, self._tick)
+
+    def _stop(self, *_):
+        if self.timer is not None:
+            GLib.source_remove(self.timer)
+            self.timer = None
+
+    def _tick(self):
+        self.queue_draw()
+        if self.kind == "thump" and time.monotonic() - self.t0 > self.delay + 1.0:
+            self.timer = None
+            return False                    # landed: no more frames until shown again
+        return True
+
+    def _frame(self):
+        """(alpha, x offset, scale) for now."""
+        t = time.monotonic() - (self.t0 or 0) - self.delay
+        if t < 0:
+            return 0.0, 0.0, 1.0
+        if self.kind == "thump":
+            p = min(1.0, t / 0.55)
+            return min(1.0, p / 0.7), 0.0, 1.9 - 0.9 * ease_back(p)
+        t %= self.every
+        if t < 0.7:
+            p = t / 0.7
+            return min(1.0, p / 0.6), -self.pad * (1 - ease_back(p)), 1.0
+        if t > self.every - 0.3:
+            return max(0.0, (self.every - t) / 0.3), 0.0, 1.0
+        return 1.0, 0.0, 1.0
+
+    def _draw(self, _w, cr):
+        alpha, dx, scale = self._frame()
+        if alpha <= 0:
+            return False
+        w, h = self.pix.get_width(), self.pix.get_height()
+        cx, cy = self.pad + w / 2.0, h / 2.0
+        cr.translate(cx + dx, cy)
+        cr.scale(scale, scale)
+        Gdk.cairo_set_source_pixbuf(cr, self.pix, -w / 2.0, -h / 2.0)
+        cr.paint_with_alpha(alpha)
+        return False
+
+
+def logo(height):
+    """The 0G mark (assets/0g-logo-white.png); the drawn SVG if the file is missing."""
+    try:
+        pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            os.path.join(ASSETS, "0g-logo-white.png"), -1, int(height), True)
+        return Gtk.Image.new_from_pixbuf(pix)
+    except GLib.Error:
+        pass
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.set_size(int(height * 232 / 108), int(height))
+        loader.write(LOGO_SVG.encode())
+        loader.close()
+        return Gtk.Image.new_from_pixbuf(loader.get_pixbuf())
+    except GLib.Error:
+        return label("0G", "hb-event")       # no SVG loader: plain text
+
+
+def lockup(conf, scale=1.0):
+    """0G mark next to the event title (two lines), then the date line."""
+    f = scale_factor() * scale
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=int(28 * f))
+    row.set_halign(Gtk.Align.CENTER)
+    row.pack_start(logo(118 * f), False, False, 0)
+    words = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+    words.set_valign(Gtk.Align.CENTER)
+    for w in (conf.get("EVENT_TITLE") or "").split()[:2]:
+        t = label(w, "hb-event", xalign=0.0)
+        if scale != 1.0:
+            t.set_markup('<span size="%d">%s</span>' % (int(70 * f * 1024 * 0.75), GLib.markup_escape_text(w)))
+        words.pack_start(t, False, False, 0)
+    row.pack_start(words, False, False, 0)
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=int(18 * f))
+    col.set_halign(Gtk.Align.CENTER)
+    col.pack_start(row, False, False, 0)
+    if conf.get("EVENT_LINE"):
+        col.pack_start(label(conf["EVENT_LINE"], "hb-line"), False, False, 0)
+    bar = Gtk.Box()
+    bar.get_style_context().add_class("hb-rulebar")
+    bar.set_size_request(int(150 * scale_factor()), 1)
+    bar.set_halign(Gtk.Align.CENTER)
+    col.pack_start(bar, False, False, int(8 * f))
+    return col
+
+
+def field(title, entry):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    box.pack_start(label(title, "hb-flabel", xalign=0.0), False, False, 0)
+    box.pack_start(entry, False, False, 0)
+    return box
+
+
+def make_entry(placeholder, max_len, on_change):
+    e = Gtk.Entry()
+    e.set_placeholder_text(placeholder)
+    e.set_max_length(max_len)
+    e.get_style_context().add_class("hb-name")
+    e.connect("changed", lambda *_: on_change())
+    return e
+
+
+# -------------------------------------------------------------- windows ---
+
+class FullScreen(Gtk.Window):
+    """Welcome, time-up and resetting faces. Covers the primary monitor."""
+
+    def __init__(self, app):
+        super().__init__(title="hack-box")
+        self.app = app
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.stick()
+        self.get_style_context().add_class("hb-full")
+        self.connect("delete-event", lambda *_: True)   # Alt+F4 does nothing
+        self.busy = False
+        self.qr_shown = None
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        # The skyline is the overlay's base, so it is drawn behind the faces.
+        layers = Gtk.Overlay()
+        layers.add(skyline())
+        layers.add_overlay(self.stack)
+        self.add(layers)
+        self.stack.add_named(self._build_welcome(), "welcome")
+        self.stack.add_named(self._build_ending(), "ending")
+        self.stack.add_named(self._build_resetting(), "resetting")
+        self.face = None
+
+    def _column(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_valign(Gtk.Align.CENTER)
+        return box
+
+    def _side_art(self):
+        """The reward ticket and the Hacker Zone stamp for the welcome face's side space, or
+        an empty list when the screen is too narrow for them beside the card."""
+        conf, f = self.app.conf, scale_factor()
+        side = (primary_geometry().width - 720 * f) / 2.0
+        if side < 300 * f:
+            return []
+        out = []
+        reward = conf.get("REWARD_TEXT") if self.app.hub else ""
+        if reward:
+            k = min(f, side * 0.8 / 560)              # the slide needs 12 % extra width
+            pix = svg_pixbuf(ticket_svg(reward), 500 * k, 420 * k)
+            if pix:
+                art = Art(pix, "slide", delay=0.2, every=7.0)
+                art.set_halign(Gtk.Align.START)
+                art.set_margin_start(int(max(16, (side - 560 * k) / 2)))
+                out.append(art)
+        k = min(f, side * 0.85 / 560)
+        pix = svg_pixbuf(stamp_svg(conf), 560 * k, 560 * k)
+        if pix:
+            art = Art(pix, "thump", delay=1.1)
+            art.set_halign(Gtk.Align.END)
+            art.set_margin_end(int(max(16, (side - 560 * k) / 2)))
+            out.append(art)
+        for art in out:
+            art.set_valign(Gtk.Align.CENTER)
+        return out
+
+    def _build_welcome(self):
+        conf = self.app.conf
+        box = self._column()
+        box.set_spacing(int(16 * scale_factor()))
+        self.starters = load_starters() if any(a["id"] == "opencode" for a in self.app.agents) else []
+        # The idea chips need the room: a slightly smaller lockup then.
+        box.pack_start(lockup(conf, scale=0.8 if self.starters else 1.0), False, False, 0)
+        box.pack_start(label("Build on 0G & Earn 0G", "hb-title"), False, False, 0)
+        art = self._side_art()
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=int(14 * scale_factor()))
+        card.get_style_context().add_class("hb-card")
+        card.set_halign(Gtk.Align.CENTER)
+        card.set_size_request(int(600 * scale_factor()), -1)
+
+        # With a hub: who is building, for the history and the download page.
+        self.name_entry = self.email_entry = self.telegram_entry = None
+        if self.app.hub:
+            self.name_entry = make_entry("Ada Lovelace", 40, self._name_changed)
+            self.email_entry = make_entry("you@example.com", 120, self._name_changed)
+            self.email_entry.set_input_purpose(Gtk.InputPurpose.EMAIL)
+            self.telegram_entry = make_entry("@username", 33, self._name_changed)
+            # Labels above the fields: a focused entry hides its placeholder.
+            card.pack_start(field("NAME", self.name_entry), False, False, 0)
+            card.pack_start(field("EMAIL", self.email_entry), False, False, 0)
+            card.pack_start(field("TELEGRAM  (OPTIONAL)", self.telegram_entry), False, False, 0)
+
+        # Idea starters: the chosen one becomes OpenCode's first prompt (hackbox-agent).
+        self.starter_id = ""
+        if self.starters:
+            try:
+                flow = Gtk.FlowBox()
+                flow.set_selection_mode(Gtk.SelectionMode.NONE)
+                flow.set_max_children_per_line(len(self.starters))
+                flow.set_column_spacing(8)
+                flow.set_row_spacing(8)
+                flow.set_homogeneous(False)
+                group = None
+                default = self.starters[-1]["id"] if self.starters[-1]["id"] == "own" else ""
+                for st in self.starters:
+                    chip = Gtk.RadioButton.new_with_label_from_widget(group, st["label"])
+                    group = group or chip
+                    chip.set_mode(False)                  # a toggle chip, not a dot
+                    chip.get_style_context().add_class("hb-chip")
+                    chip.set_can_focus(False)
+                    chip.connect("toggled", self._starter_toggled, st["id"])
+                    flow.add(chip)
+                    if st["id"] == default:
+                        chip.set_active(True)
+                        self.starter_id = default
+                if not default:
+                    group.set_active(True)
+                    self.starter_id = self.starters[0]["id"]
+                card.pack_start(field("WHAT DO YOU WANT TO BUILD?", flow), False, False, 0)
+            except (TypeError, AttributeError, GLib.Error):
+                self.starter_id = ""           # no chips: OpenCode starts plain, as before
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        buttons.set_homogeneous(True)
+        self.start_buttons = []
+        agents = self.app.agents
+        if agents:
+            for agent in agents:
+                note = agent["note"] if agent["ready"] else "not ready yet, ask staff"
+                buttons.pack_start(self._start_button("Start with " + agent["label"], note, agent),
+                                   True, True, 0)
+        else:
+            buttons.pack_start(self._start_button("Start my session", "", None), True, True, 0)
+        card.pack_start(buttons, False, False, 6)
+        # Why Start is still grey, once something is typed (a missing @ is the usual one).
+        self.form_hint = label("", "hb-error", wrap=True)
+        self.form_hint.set_no_show_all(True)
+        card.pack_start(self.form_hint, False, False, 0)
+        self.welcome_error = label("", "hb-error", wrap=True)
+        self.welcome_error.set_no_show_all(True)
+        card.pack_start(self.welcome_error, False, False, 0)
+        box.pack_start(card, False, False, 0)
+
+        rules = "The clock starts when you press Start; when time is up this machine is wiped."
+        if self.app.hub:
+            rules += "\nYou get a QR code to download your project at the end."
+        reward = self.app.conf.get("REWARD_TEXT") if self.app.hub else ""
+        if reward and not any(a.kind == "slide" for a in art):
+            # No room for the ticket: say it in a line instead.
+            box.pack_start(label("Finish your session and claim " + reward + ".", "hb-body"),
+                           False, False, 0)
+        rules += "\nNever enter personal passwords, wallet seeds or private keys here."
+        box.pack_start(label(rules, "hb-muted", wrap=True), False, False, 0)
+        box.pack_start(label(socket.gethostname().upper(), "hb-tiny"), False, False, 4)
+        self._name_changed()
+        if not art:
+            return box
+        face = Gtk.Overlay()
+        face.add(box)
+        for a in art:
+            face.add_overlay(a)
+            face.set_overlay_pass_through(a, True)    # clicks go to whatever is beneath
+        return face
+
+    def _starter_toggled(self, chip, starter_id):
+        if chip.get_active():
+            self.starter_id = starter_id
+
+    def attendee_name(self):
+        if self.name_entry is None:
+            return ""
+        return " ".join(self.name_entry.get_text().split())
+
+    def attendee_email(self):
+        if self.email_entry is None:
+            return ""
+        return self.email_entry.get_text().strip()
+
+    def attendee_telegram(self):
+        if self.telegram_entry is None:
+            return ""
+        t = self.telegram_entry.get_text().strip().lstrip("@")
+        return "@" + t if re.fullmatch(r"[A-Za-z0-9_]{5,32}", t) else ""
+
+    def _name_changed(self):
+        """Start stays disabled until a name (2+ characters) and an email are typed, and for
+        an agent the box has no key for."""
+        ok = self.name_entry is None or (
+            len(self.attendee_name()) >= 2 and
+            re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", self.attendee_email()) is not None)
+        tg = self.telegram_entry.get_text().strip().lstrip("@") if self.telegram_entry else ""
+        if tg and not re.fullmatch(r"[A-Za-z0-9_]{5,32}", tg):
+            ok = False                          # optional, but if typed it must be valid
+        for b in self.start_buttons:
+            b.set_sensitive(ok and not self.busy and getattr(b, "hb_ready", True))
+        hint = getattr(self, "form_hint", None)
+        if hint is not None and self.name_entry is not None:
+            name, email = self.attendee_name(), self.attendee_email()
+            msg = ""
+            if name and len(name) < 2:
+                msg = "Name: at least 2 characters."
+            elif email and "@" not in email:
+                msg = "Email needs an @ (Shift + 2), like name@example.com."
+            elif email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                msg = "Email looks incomplete, like name@example.com."
+            elif tg and not re.fullmatch(r"[A-Za-z0-9_]{5,32}", tg):
+                msg = "Telegram: 5 to 32 letters, digits or _ (or leave it empty)."
+            hint.set_text(msg)
+            hint.set_visible(bool(msg))
+
+    def _start_button(self, text, note, agent):
+        btn = Gtk.Button()
+        btn.get_style_context().add_class("hb-start")
+        btn.hb_ready = agent is None or agent["ready"]
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        inner.pack_start(label(text), False, False, 0)
+        if note:
+            inner.pack_start(label(note, "hb-note"), False, False, 0)
+        btn.add(inner)
+        btn.connect("clicked", lambda *_: self.app.begin(agent))
+        self.start_buttons.append(btn)
+        return btn
+
+    def _build_ending(self):
+        box = self._column()
+        box.set_spacing(int(14 * scale_factor()))
+        box.pack_start(lockup(self.app.conf, scale=0.55), False, False, 0)
+        self.ending_title = label("Time is up. Thanks for building!", "hb-title")
+        box.pack_start(self.ending_title, False, False, 6)
+        self.code_intro = label("", "hb-body", wrap=True)
+        self.qr_image = Gtk.Image()
+        self.qr_frame = Gtk.Box()
+        self.qr_frame.get_style_context().add_class("hb-qr")
+        self.qr_frame.set_halign(Gtk.Align.CENTER)
+        self.qr_frame.add(self.qr_image)
+        self.url_label = label("", "hb-url", wrap=True)
+        self.url_label.set_selectable(False)
+        self.code_label = label("", "hb-code")
+        self.code_after = label("", "hb-muted", wrap=True)
+        self.done_button = Gtk.Button(label="Done")
+        self.done_button.get_style_context().add_class("hb-start")
+        self.done_button.set_halign(Gtk.Align.CENTER)
+        self.done_button.set_size_request(int(280 * scale_factor()), -1)
+        self.done_button.connect("clicked", self._done)
+        self.ending_countdown = label("", "hb-muted")
+        # Shown or hidden per session by _update_ending, not by show_all().
+        for w in (self.qr_frame, self.url_label, self.done_button):
+            w.set_no_show_all(True)
+        self.qr_image.show()
+        for w in (self.code_intro, self.qr_frame, self.url_label, self.code_label,
+                  self.code_after, self.done_button, self.ending_countdown):
+            box.pack_start(w, False, False, 4)
+        return box
+
+    def _done(self, *_):
+        self.done_button.set_sensitive(False)
+        start_unit("hackbox-done.service", lambda ok, msg: False)
+
+    def _build_resetting(self):
+        box = self._column()
+        box.set_spacing(int(18 * scale_factor()))
+        box.pack_start(lockup(self.app.conf, scale=0.55), False, False, 0)
+        box.pack_start(label("Getting this station ready for the next builder…", "hb-title"),
+                       False, False, 0)
+        box.pack_start(label("This takes a few seconds.", "hb-muted"), False, False, 0)
+        return box
+
+    def set_busy(self, busy, error=""):
+        self.busy = busy
+        self._name_changed()
+        self.welcome_error.set_text(error)
+        self.welcome_error.set_visible(bool(error))
+
+    def show_face(self, face):
+        if face != self.face:
+            self.face = face
+            if face == "ending":
+                self.done_button.set_sensitive(True)
+        if face == "ending":
+            self._update_ending()
+        geo = primary_geometry()
+        if not self.get_visible():
+            self.move(geo.x, geo.y)
+            self.resize(geo.width, geo.height)
+            self.show_all()
+            self.fullscreen()
+        # After show_all: a Gtk.Stack ignores a switch to a child that is not
+        # visible yet, which left an overlay started mid "ending" (relaunched
+        # by the guard) on the welcome face.
+        if self.stack.get_visible_child_name() != face:
+            self.stack.set_visible_child_name(face)
+        # Keep the gate in front: taken back if the attendee switches away.
+        if not self.is_active():
+            self.set_keep_above(True)
+            self.present()
+
+    def _update_ending(self):
+        name = read_run("attendee")
+        self.ending_title.set_text("Time is up. Thanks for building, %s!" % name.split()[0] if name
+                                   else "Time is up. Thanks for building!")
+        self.done_button.set_visible(self.app.hub)
+        url, hub_code = read_run("hub-url"), read_run("hub-code")
+        if url and hub_code and self._show_qr():
+            # The hub has the session: the phone page says "Preparing" until the
+            # reset archived and the agent uploaded ~/project, a few seconds after Done.
+            reward = self.app.conf.get("REWARD_TEXT")
+            self.code_intro.set_text("Scan to download your project" +
+                                     (" and claim " + reward if reward else "") +
+                                     " (valid 7 days):")
+            self.url_label.set_text(url)
+            self.code_label.set_text(hub_code)
+            self.code_after.set_text("Or type this code at %s/code\n"
+                                     "Dependencies, build output and secret files such as .env "
+                                     "are not kept." % url.split("/d/")[0])
+            self.url_label.show()
+        else:
+            self.qr_frame.hide()
+            self.url_label.hide()
+            self._local_code()
+        until = read_run_int("ending-until")
+        if self.app.hub:
+            # No countdown with a hub: the screen waits for Done (or staff, from the dashboard).
+            self.ending_countdown.set_text("Press Done when you have your project. "
+                                           "This machine is wiped for the next person after that.")
+        elif until:
+            left = max(0, until - int(time.time()))
+            self.ending_countdown.set_text("This machine is wiped in %d s." % left)
+        else:
+            self.ending_countdown.set_text("")
+
+    def _show_qr(self):
+        """The hub's QR image, scaled to a third of the screen height. False
+        when there is none (hub down at the start of the session)."""
+        path = os.path.join(RUN, "qr.png")
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return False
+        if self.qr_shown != mtime:
+            try:
+                size = int(primary_geometry().height / 3.6)
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+            except GLib.Error:
+                return False
+            self.qr_image.set_from_pixbuf(pix)
+            self.qr_shown = mtime
+        self.qr_frame.show()
+        return True
+
+    def _local_code(self):
+        code = read_run("code")
+        hours = as_int(self.app.conf["ARCHIVE_HOURS"], 24)
+        if code:
+            self.code_intro.set_text("Your ~/project was saved. Your pickup code:")
+            self.code_label.set_text(code)
+            self.code_after.set_text(
+                "Show this code at the help desk within %d hours to get a copy.\n"
+                "Dependencies, build output and secret files such as .env are not kept." % hours)
+        else:
+            self.code_intro.set_text("There was nothing new in ~/project to save.")
+            self.code_label.set_text("")
+            self.code_after.set_text("")
+
+
+class Pill(Gtk.Window):
+    """The countdown. A POPUP (override-redirect) window: no decorations, no
+    taskbar entry, stays above normal and full-screen windows."""
+
+    def __init__(self, app):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.app = app
+        self.at_top = True
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual is not None and screen.is_composited():
+            self.set_visual(visual)
+        self.get_style_context().add_class("hb-pill")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_border_width(4)
+        # Clicking the time moves the pill between the top and bottom edge,
+        # in case it covers something the attendee needs.
+        ev = Gtk.EventBox()
+        self.time_label = Gtk.Label(label="--:--")
+        ev.add(self.time_label)
+        ev.connect("button-press-event", self._toggle_edge)
+        ev.set_tooltip_text("Click to move")
+        end = Gtk.Button(label="End now")
+        end.get_style_context().add_class("hb-endbtn")
+        end.connect("clicked", self._confirm_end)
+        box.pack_start(ev, False, False, 0)
+        # With a hub: ask the staff for more time (approved on the dashboard).
+        self.more = self.ask_label = None
+        if app.hub:
+            self.more = Gtk.Button(label="More time")
+            self.more.get_style_context().add_class("hb-endbtn")
+            self.more.connect("clicked", self._ask_more)
+            self.ask_label = Gtk.Label()
+            self.ask_label.get_style_context().add_class("hb-ask")
+            box.pack_start(self.more, False, False, 0)
+            box.pack_start(self.ask_label, False, False, 0)
+        box.pack_start(end, False, False, 0)
+        self.add(box)
+        self.dialog = None
+        self.asked_at = 0
+
+    def _ask_more(self, *_):
+        self.asked_at = time.time()
+        start_unit("hackbox-extend-request.service", lambda ok, msg: False)
+
+    def update_request(self):
+        """Mirror /run/hackbox/extend-status (root writes it): pending while
+        the staff decide, then the answer for 20 s. No new request for 2
+        minutes after a decline (the request script enforces it too)."""
+        if self.more is None:
+            return
+        parts = (read_run("extend-status") or "").split()
+        try:
+            age = time.time() - os.path.getmtime(os.path.join(RUN, "extend-status"))
+        except OSError:
+            age = 1e9
+        status = parts[0] if parts else ""
+        if status == "pending":
+            text, can_ask = "asked the staff…", False
+        elif time.time() - self.asked_at < 5:
+            text, can_ask = "asking…", False
+        elif status == "approved" and age < 20:
+            text, can_ask = "+%s min" % (parts[1] if len(parts) > 1 else "?"), True
+        elif status == "declined" and age < 120:
+            text, can_ask = ("not this time" if age < 20 else ""), False
+        else:
+            text, can_ask = "", True
+        if self.ask_label.get_text() != text:
+            self.ask_label.set_text(text)
+        if self.more.get_sensitive() != can_ask:
+            self.more.set_sensitive(can_ask)
+
+    def _toggle_edge(self, *_):
+        self.at_top = not self.at_top
+        self._place()
+        return True
+
+    def _place(self):
+        geo = primary_geometry()
+        w, h = self.get_size()
+        margin = max(4, int(6 * scale_factor()))
+        # The bottom edge sits above Cinnamon's panel (about 40 px at scale 1).
+        y = geo.y + margin if self.at_top else geo.y + geo.height - h - int(48 * scale_factor())
+        self.move(geo.x + (geo.width - w) // 2, y)
+
+    def _confirm_end(self, *_):
+        if self.dialog is not None:
+            self.dialog.present()
+            return
+        d = Gtk.MessageDialog(message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.NONE,
+                              text="End your session now?")
+        d.format_secondary_text("Your ~/project is saved for pickup, then this machine is "
+                                "wiped for the next person. This cannot be undone.")
+        d.add_button("Keep going", Gtk.ResponseType.CANCEL)
+        d.add_button("End now", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.CANCEL)
+        d.set_keep_above(True)
+        d.set_position(Gtk.WindowPosition.CENTER)
+        self.dialog = d
+
+        def on_response(dialog, response):
+            dialog.destroy()
+            self.dialog = None
+            if response == Gtk.ResponseType.OK:
+                start_unit("hackbox-reset.service", lambda ok, msg: False)
+        d.connect("response", on_response)
+        d.show_all()
+        d.present()
+
+    def update(self, left):
+        self.time_label.set_text("%02d:%02d" % (left // 60, left % 60))
+        ctx = self.get_style_context()
+        crit, warn = left <= 60, 60 < left <= 300
+        for cls, on in (("crit", crit), ("warn", warn)):
+            if on and not ctx.has_class(cls):
+                ctx.add_class(cls)
+            elif not on and ctx.has_class(cls):
+                ctx.remove_class(cls)
+        if not self.get_visible():
+            self.show_all()
+        self._place()
+
+    def hide_all(self):
+        if self.dialog is not None:
+            self.dialog.destroy()
+            self.dialog = None
+        self.hide()
+
+
+class Toast(Gtk.Window):
+    """Large warning at 5:00 and 1:00 (popups from the notification daemon
+    are switched off on these boxes, so the overlay shows its own)."""
+
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.get_style_context().add_class("hb-toast")
+        ev = Gtk.EventBox()
+        self.text = Gtk.Label()
+        self.text.set_justify(Gtk.Justification.CENTER)
+        self.text.set_margin_top(18)
+        self.text.set_margin_bottom(18)
+        self.text.set_margin_start(36)
+        self.text.set_margin_end(36)
+        ev.add(self.text)
+        ev.connect("button-press-event", lambda *_: self.hide() or True)
+        self.add(ev)
+        self.timer = None
+
+    def flash(self, minutes):
+        ctx = self.get_style_context()
+        if minutes <= 1:
+            ctx.add_class("crit")
+            msg = "1 minute left.\nEverything on this machine is wiped at 00:00."
+        else:
+            ctx.remove_class("crit")
+            msg = ("%d minutes left.\nCommit and push your work now." % minutes)
+        self.text.set_text(msg)
+        self.show_all()
+        geo = primary_geometry()
+        w, h = self.get_size()
+        self.move(geo.x + (geo.width - w) // 2, geo.y + geo.height // 4)
+        if self.timer:
+            GLib.source_remove(self.timer)
+        self.timer = GLib.timeout_add_seconds(12, self._expire)
+
+    def _expire(self):
+        self.timer = None
+        self.hide()
+        return False
+
+
+# ------------------------------------------------------------------ app ---
+
+class Overlay:
+    def __init__(self):
+        self.conf = load_conf()
+        self.hub = self.conf.get("HUB_ENABLED") == "1"
+        self.agents = load_agents()
+        self.provider = Gtk.CssProvider()
+        install_css(self.provider)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), self.provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Gdk.Screen.get_default().connect("monitors-changed", self._monitors_changed)
+        self.full = FullScreen(self)
+        self.pill = Pill(self)
+        self.toast = Toast()
+        self.last_state = None
+        self.we_started = False
+        self.pending_agent = None
+        self.start_deadline = 0
+        self.last_warn = read_run("warn")     # do not replay an old warning
+
+    def _monitors_changed(self, *_):
+        install_css(self.provider)
+        if self.full.get_visible():
+            geo = primary_geometry()
+            self.full.move(geo.x, geo.y)
+            self.full.resize(geo.width, geo.height)
+
+    def begin(self, agent):
+        """Start button: ask systemd for the timer, then open the terminal."""
+        self.full.set_busy(True, "")
+        if self.hub:
+            save_attendee(self.full.attendee_name(), agent["id"] if agent else "",
+                          self.full.attendee_email(), self.full.attendee_telegram())
+        if agent and agent["id"] == "opencode" and self.full.starter_id:
+            save_starter(self.full.starter_id)
+        self.we_started = True
+        self.pending_agent = agent
+        self.start_deadline = time.time() + 15
+
+        def done(ok, msg):
+            if not ok:
+                self.we_started = False
+                self.pending_agent = None
+                self.full.set_busy(False, "Could not start the session (%s). "
+                                          "Please ask a staff member." % (msg or "no reason given"))
+            return False
+        start_unit("hackbox-session.service", done)
+
+    def tick(self):
+        state = read_run("state") or "idle"
+        if state == "active":
+            end = read_run_int("session-end")
+            if end is None:
+                return True
+            if self.last_state != "active":
+                self.full.hide()
+                self.full.set_busy(False, "")
+                # Our button: open the chosen agent. Staff `hackbox start`:
+                # a plain terminal, so the attendee is not left guessing.
+                if self.we_started or self.last_state == "idle":
+                    open_terminal(self.pending_agent, self.conf.get("START_URL") or "")
+                self.we_started = False
+                self.pending_agent = None
+            self.pill.update(max(0, end - int(time.time())))
+            self.pill.update_request()
+            self._check_warning()
+        elif state in ("ending", "resetting"):
+            self.pill.hide_all()
+            self.toast.hide()
+            self.full.show_face("ending" if state == "ending" else "resetting")
+        else:
+            self.pill.hide_all()
+            self.toast.hide()
+            if self.we_started and time.time() > self.start_deadline:
+                self.we_started = False
+                self.pending_agent = None
+                self.full.set_busy(False, "The session did not start. Please ask a staff member.")
+            self.full.show_face("welcome")
+        self.last_state = state
+        return True
+
+    def _check_warning(self):
+        warn = read_run("warn")
+        if not warn or warn == self.last_warn:
+            return
+        self.last_warn = warn
+        parts = warn.split()
+        minutes = as_int(parts[0], None) if parts else None
+        stamp = as_int(parts[1], 0) if len(parts) > 1 else 0
+        if minutes is not None and time.time() - stamp < 60:
+            self.toast.flash(minutes)
+
+
+def single_instance():
+    """One overlay per session. The lock dies with the process."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    path = os.path.join(runtime, "hackbox-overlay.lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except OSError:
+        return None
+
+
+def main():
+    lock = single_instance()
+    if lock is None:
+        return 0
+    if Gdk.Display.get_default() is None:
+        Gtk.init_check(sys.argv)
+    if Gdk.Display.get_default() is None:
+        print("hackbox-overlay: no display", file=sys.stderr)
+        return 1
+    apply_terminal_profile()
+    app = Overlay()
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, Gtk.main_quit)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, Gtk.main_quit)
+    app.tick()
+    GLib.timeout_add(500, app.tick)
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

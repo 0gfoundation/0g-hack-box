@@ -1,0 +1,448 @@
+#!/usr/bin/env python3
+# Local mock API for hack-box builders: prices, candles, order books, markets, an AI model
+# and agent marketplace, NFT/data listings, news and wallet portfolios. Many hackathon ideas
+# (trading dashboards, AI marketplaces) need an external API that has no key on the box or
+# takes too long to sign up for in a short session; this lets the app show something real
+# looking at once. Every response is marked mock: a "mock": true field, a "notice" line and an
+# X-Mock-Data header, so the app can show a "Mock data" badge.
+# Prices move as a smooth random walk of the clock, so polling looks live and two tabs agree.
+# One route is real, not mock: POST /v1/chat/completions (OpenAI shape, streaming too) and the
+# simpler POST /ai/chat relay to 0G Compute with the box's router key, so an app's browser
+# code gets live AI without ever holding the key. The key is the same per-box, credit-limited
+# key the attendee's shell already has; the service only listens on 127.0.0.1.
+# Stdlib only, no state. Runs as the hackbox-mock-api service on 127.0.0.1:4010.
+#   0g-mock-api [--port 4010] [--host 127.0.0.1]
+import argparse
+import glob
+import os
+import re
+import hashlib
+import json
+import math
+import random
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
+
+NOTICE = "Mock data from 0g-mock-api on this hack-box. Not real market data."
+
+ASSETS = {
+    "0G": 2.84, "BTC": 98250.0, "ETH": 3620.0, "SOL": 212.0, "BNB": 655.0,
+    "USDC": 1.0, "USDT": 1.0, "ARB": 0.92, "OP": 2.15, "LINK": 21.4,
+    "AVAX": 41.2, "DOGE": 0.31, "TON": 6.2, "SUI": 4.1, "PEPE": 0.0000182,
+}
+STABLE = {"USDC", "USDT"}
+
+
+def seed_float(*parts):
+    h = hashlib.sha256("|".join(str(p) for p in parts).encode()).digest()
+    return int.from_bytes(h[:8], "big") / 2.0 ** 64
+
+
+def price_at(sym, t):
+    """A smooth, deterministic walk around the base price: the same for every caller."""
+    base = ASSETS.get(sym, 1.0 + seed_float(sym) * 50)
+    if sym in STABLE:
+        return round(base + (seed_float(sym, int(t // 60)) - 0.5) * 0.002, 4)
+    k = seed_float(sym)
+    wave = (0.06 * math.sin(t / (3600 * (2 + 3 * k))) + 0.02 * math.sin(t / (300 * (1 + k)))
+            + 0.006 * math.sin(t / (23 * (1 + k))))
+    step = int(t // 5)
+    jitter = (seed_float(sym, step) - 0.5) * 0.004
+    return base * (1 + wave + jitter)
+
+
+def rnd(x):
+    if x >= 1000:
+        return round(x, 2)
+    if x >= 1:
+        return round(x, 4)
+    return float("%.6g" % x)
+
+
+def sym_of(q, default="ETH"):
+    s = (q.get("symbol") or [default])[0].upper().replace("-USD", "").replace("/USD", "")
+    return s.replace("USDT", "") if s not in STABLE and s.endswith("USDT") else s
+
+
+def num(q, key, default, lo, hi):
+    try:
+        return max(lo, min(hi, int((q.get(key) or [default])[0])))
+    except ValueError:
+        return default
+
+
+def prices(q):
+    t = time.time()
+    syms = [s.strip().upper() for s in (q.get("symbols") or [",".join(ASSETS)])[0].split(",") if s.strip()]
+    out = []
+    for s in syms:
+        p, p24 = price_at(s, t), price_at(s, t - 86400)
+        out.append({"symbol": s, "price_usd": rnd(p), "change_24h_pct": round((p / p24 - 1) * 100, 2),
+                    "volume_24h_usd": round(5e6 + seed_float(s, "vol") * 9e8, 0),
+                    "market_cap_usd": round(p * (1e8 + seed_float(s, "cap") * 2e10), 0)})
+    return {"prices": out, "updated_at": int(t)}
+
+
+INTERVALS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
+def candles(q):
+    s = sym_of(q)
+    iv = (q.get("interval") or ["1h"])[0]
+    sec = INTERVALS.get(iv, 3600)
+    n = num(q, "limit", 100, 1, 500)
+    end = int(time.time() // sec) * sec
+    out = []
+    for i in range(n, 0, -1):
+        t0 = end - i * sec
+        o, c = price_at(s, t0), price_at(s, t0 + sec)
+        hi = max(o, c) * (1 + seed_float(s, t0, "h") * 0.004)
+        lo = min(o, c) * (1 - seed_float(s, t0, "l") * 0.004)
+        out.append({"t": t0, "open": rnd(o), "high": rnd(hi), "low": rnd(lo), "close": rnd(c),
+                    "volume": round(10 + seed_float(s, t0, "v") * 900, 3)})
+    return {"symbol": s, "interval": iv if iv in INTERVALS else "1h", "candles": out}
+
+
+def orderbook(q):
+    s = sym_of(q)
+    depth = num(q, "depth", 15, 1, 100)
+    t = time.time()
+    mid = price_at(s, t)
+    r = random.Random(int(t // 2))
+    tick = mid * 0.0004
+    bids = [[rnd(mid - tick * (i + 1)), round(r.uniform(0.05, 12), 4)] for i in range(depth)]
+    asks = [[rnd(mid + tick * (i + 1)), round(r.uniform(0.05, 12), 4)] for i in range(depth)]
+    return {"symbol": s, "mid": rnd(mid), "bids": bids, "asks": asks, "updated_at": int(t)}
+
+
+def trades(q):
+    s = sym_of(q)
+    n = num(q, "limit", 30, 1, 200)
+    t = time.time()
+    r = random.Random(int(t))
+    out = []
+    for i in range(n):
+        ts = t - i * r.uniform(0.5, 4)
+        out.append({"id": "%s-%d" % (s, int(ts * 1000)), "price": rnd(price_at(s, ts)),
+                    "size": round(r.uniform(0.01, 5), 4), "side": r.choice(["buy", "sell"]),
+                    "time": int(ts)})
+    return {"symbol": s, "trades": out}
+
+
+def markets(q):
+    t = time.time()
+    out = []
+    for s in ASSETS:
+        if s in STABLE:
+            continue
+        p, p24 = price_at(s, t), price_at(s, t - 86400)
+        out.append({"pair": s + "/USDC", "base": s, "quote": "USDC", "price": rnd(p),
+                    "change_24h_pct": round((p / p24 - 1) * 100, 2),
+                    "high_24h": rnd(max(p, p24) * 1.01), "low_24h": rnd(min(p, p24) * 0.99),
+                    "volume_24h_usd": round(5e6 + seed_float(s, "vol") * 9e8, 0)})
+    return {"markets": out}
+
+
+MODELS = [
+    ("0GM 1.0 35B-A3B", "0G Labs", "chat", 0.12, 0.48), ("GLM-5.3", "Zhipu", "chat", 0.6, 2.2),
+    ("Kimi K2.7 Code", "Moonshot", "code", 0.55, 2.1), ("Qwen3.6 72B", "Alibaba", "chat", 0.4, 1.2),
+    ("DeepSeek V4", "DeepSeek", "reasoning", 0.27, 1.1), ("Llama 4.2 70B", "Meta", "chat", 0.35, 0.9),
+    ("Flux 2 Pro", "Black Forest Labs", "image", 0.0, 0.04), ("Whisper v4", "OpenAI", "speech", 0.006, 0.0),
+    ("SDXL Turbo 2", "Stability", "image", 0.0, 0.01), ("Mistral Large 3", "Mistral", "chat", 2.0, 6.0),
+    ("Embed-1 v3", "Nomic", "embedding", 0.02, 0.0), ("Sentinel Guard 8B", "Community", "moderation", 0.05, 0.05),
+]
+
+
+def ai_models(q):
+    cat = (q.get("category") or [""])[0].lower()
+    out = []
+    for i, (name, prov, c, pin, pout) in enumerate(MODELS):
+        if cat and c != cat:
+            continue
+        k = seed_float(name)
+        out.append({"id": "model-%03d" % (i + 1), "name": name, "provider": prov, "category": c,
+                    "price_per_1m_input_usd": pin, "price_per_1m_output_usd": pout,
+                    "rating": round(3.8 + k * 1.2, 1), "reviews": int(40 + k * 4000),
+                    "runs_24h": int(1000 + k * 250000), "latency_ms": int(120 + (1 - k) * 900),
+                    "verified_on_0g": i % 3 != 2})
+    return {"models": out, "categories": sorted({m[2] for m in MODELS})}
+
+
+AGENTS = ["Alpha Scout", "Yield Hunter", "Doc Summarizer", "Code Reviewer", "Meme Forge",
+          "Airdrop Tracker", "Sentiment Oracle", "Portfolio Rebalancer", "NFT Appraiser",
+          "Gas Optimizer", "Research Analyst", "Support Bot"]
+
+
+def ai_agents(q):
+    out = []
+    for i, name in enumerate(AGENTS):
+        k = seed_float(name, "agent")
+        out.append({"id": "agent-%03d" % (i + 1), "name": name,
+                    "creator": "0x%s" % hashlib.sha1(name.encode()).hexdigest()[:40],
+                    "price_per_call_0g": round(0.001 + k * 0.05, 4), "rating": round(3.6 + k * 1.4, 1),
+                    "calls_total": int(500 + k * 90000), "tags": ["defi", "ai", "social", "dev"][i % 4:i % 4 + 2],
+                    "description": "%s: an autonomous agent listed on the marketplace (mock)." % name})
+    return {"agents": out}
+
+
+def listings(q):
+    n = num(q, "limit", 24, 1, 100)
+    kinds = ["NFT", "Dataset", "Model weights", "Prompt pack", "Domain"]
+    out = []
+    for i in range(n):
+        k = seed_float("listing", i)
+        kind = kinds[i % len(kinds)]
+        out.append({"id": "lst-%04d" % (i + 1), "title": "%s #%d" % (kind, 100 + i * 7), "kind": kind,
+                    "price_0g": round(0.5 + k * 120, 2),
+                    "seller": "0x%s" % hashlib.sha1(("s%d" % i).encode()).hexdigest()[:40],
+                    "image": "https://picsum.photos/seed/0g%d/400/400" % i,
+                    "likes": int(k * 900), "listed_at": int(time.time() - k * 30 * 86400)})
+    return {"listings": out}
+
+
+HEADLINES = ["0G mainnet sees record storage uploads", "ETH gas hits a monthly low",
+             "AI agents now settle payments on-chain", "BTC holds above key support",
+             "New DePIN projects launch in Singapore", "Stablecoin volume climbs 12% this week",
+             "Developers ship 400 dapps at weekend hackathon", "L2 fees fall after upgrade",
+             "Decentralized AI compute demand doubles", "Analysts eye SOL ETF decision"]
+
+
+def news(q):
+    t = int(time.time() // 600) * 600
+    out = []
+    for i, h in enumerate(HEADLINES):
+        k = seed_float(h, t)
+        out.append({"id": i + 1, "title": h, "source": ["CoinDesk", "The Block", "Decrypt", "0G Blog"][i % 4],
+                    "sentiment": "positive" if k > 0.55 else "negative" if k < 0.25 else "neutral",
+                    "published_at": t - i * 1800})
+    return {"articles": out}
+
+
+def portfolio(q):
+    addr = (q.get("address") or ["0x0000000000000000000000000000000000000000"])[0]
+    t = time.time()
+    hold = []
+    for s in ("0G", "ETH", "BTC", "USDC", "SOL", "LINK"):
+        k = seed_float(addr.lower(), s)
+        if k < 0.2:
+            continue
+        amt = k * (5000 / ASSETS[s]) * 3
+        hold.append({"symbol": s, "amount": round(amt, 6), "value_usd": round(amt * price_at(s, t), 2)})
+    return {"address": addr, "holdings": hold, "total_usd": round(sum(h["value_usd"] for h in hold), 2)}
+
+
+ROUTES = {
+    "/prices": (prices, "Spot prices. ?symbols=BTC,ETH,0G"),
+    "/candles": (candles, "OHLCV candles. ?symbol=ETH&interval=1m|5m|15m|1h|4h|1d&limit=100"),
+    "/orderbook": (orderbook, "Order book. ?symbol=ETH&depth=15"),
+    "/trades": (trades, "Recent trades. ?symbol=ETH&limit=30"),
+    "/markets": (markets, "Trading pairs with 24h stats"),
+    "/ai/models": (ai_models, "AI model marketplace. ?category=chat|code|image|..."),
+    "/ai/agents": (ai_agents, "AI agent marketplace"),
+    "/marketplace/listings": (listings, "NFT / dataset / model listings. ?limit=24"),
+    "/news": (news, "Crypto news headlines with sentiment"),
+    "/portfolio": (portfolio, "Wallet holdings. ?address=0x..."),
+}
+
+
+
+# ----------------------------------------------------------- live AI ---
+
+def box_conf():
+    """KEY=value pairs from /etc/hackbox/conf.d (later files win), quotes stripped."""
+    out = {}
+    for f in sorted(glob.glob("/etc/hackbox/conf.d/*.conf")):
+        try:
+            for line in open(f, encoding="utf-8"):
+                m = re.match(r"\s*([A-Z_][A-Z0-9_]*)=(.*)$", line)
+                if m:
+                    out[m.group(1)] = m.group(2).strip().strip("'\"")
+        except OSError:
+            pass
+    return out
+
+
+def router_key():
+    try:
+        with open("/etc/hackbox/secrets/0g-router-key") as fh:
+            return "".join(fh.read().split())
+    except OSError:
+        return ""
+
+
+def ai_setup():
+    c = box_conf()
+    base = (c.get("OG_ROUTER_URL") or "https://router-api.0g.ai").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    default = c.get("OG_MODEL") or "glm-5.3"
+    allowed = [m for m in (default, c.get("OG_SMALL_MODEL"), c.get("OG_FALLBACK_MODEL")) if m]
+    return base, default, allowed
+
+
+AI_MAX_TOKENS = 4096
+AI_MIN_TOKENS = 1024
+UA = "hackbox-mock-api/1"
+
+
+def relay(handler, body, simple):
+    """Forward one chat request to the 0G Compute Router; stream back if asked."""
+    base, default, allowed = ai_setup()
+    key = router_key()
+    if not key:
+        handler.send(503, {"mock": False, "error": "no 0G Compute key on this box, ask staff"})
+        return
+    msgs = body.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            handler.send(400, {"mock": False, "error": "send messages: [...] or prompt: \"...\""})
+            return
+        msgs = ([{"role": "system", "content": str(body["system"])}] if body.get("system") else []) + \
+               [{"role": "user", "content": prompt}]
+    model = body.get("model") if body.get("model") in allowed else default
+    out = {k: v for k, v in body.items() if k in ("temperature", "top_p", "stop", "tools",
+                                                  "tool_choice", "response_format", "stream")}
+    out.update({"model": model, "messages": msgs,
+                # Reasoning models think before they answer: a small cap returns an empty reply,
+                # so never below AI_MIN_TOKENS.
+                "max_tokens": max(AI_MIN_TOKENS, min(int(body.get("max_tokens") or 2048),
+                                                     AI_MAX_TOKENS))})
+    stream = bool(out.get("stream")) and not simple
+    if simple:
+        out.pop("stream", None)
+    req = Request(base + "/v1/chat/completions", data=json.dumps(out).encode(), method="POST",
+                  headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                           "User-Agent": UA, "X-0G-Provider-Sort": "latency"})
+    try:
+        resp = urlopen(req, timeout=300)
+    except HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode() or "{}")
+        except ValueError:
+            detail = {}
+        handler.send(e.code, {"mock": False, "error": "0G Compute returned %d" % e.code,
+                              "detail": detail})
+        return
+    except (URLError, OSError) as e:
+        handler.send(502, {"mock": False, "error": "0G Compute unreachable: %s" % e})
+        return
+    with resp:
+        if stream:
+            handler.send_response(200)
+            handler.cors()
+            handler.send_header("Content-Type", resp.headers.get("Content-Type", "text/event-stream"))
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("X-Mock-Data", "false")
+            handler.end_headers()
+            while True:
+                chunk = resp.read1(65536) if hasattr(resp, "read1") else resp.read(4096)
+                if not chunk:
+                    break
+                try:
+                    handler.wfile.write(chunk)
+                    handler.wfile.flush()
+                except OSError:
+                    break                      # the browser went away
+            return
+        data = json.loads(resp.read().decode() or "{}")
+    if not simple:
+        handler.send(200, data, mock=False)
+        return
+    try:
+        reply = data["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError, TypeError):
+        reply = ""
+    handler.send(200, {"mock": False, "source": "0G Compute", "model": data.get("model", model),
+                       "reply": reply.strip(), "usage": data.get("usage", {})}, mock=False)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "0g-mock-api/1"
+
+    def log_message(self, *a):
+        pass
+
+    def cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+    def send(self, code, body, mock=True):
+        data = json.dumps(body, indent=1).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.cors()
+        self.send_header("X-Mock-Data", "true" if mock else "false")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        path = urlparse(self.path).path.rstrip("/")
+        if path.startswith("/api/"):
+            path = path[4:]
+        if path not in ("/v1/chat/completions", "/chat/completions", "/ai/chat"):
+            self.send(404, {"mock": True, "error": "POST goes to /v1/chat/completions or /ai/chat",
+                            "see": "/"})
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(min(n, 2_000_000)).decode() or "{}")
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
+            self.send(400, {"mock": False, "error": "body must be a JSON object"})
+            return
+        relay(self, body, simple=(path == "/ai/chat"))
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        path = u.path.rstrip("/") or "/"
+        if path.startswith("/api/"):
+            path = path[4:]
+        if path == "/":
+            self.send(200, {"mock": True, "notice": NOTICE,
+                            "endpoints": {k: v[1] for k, v in ROUTES.items()},
+                            "live_ai": {
+                                "POST /ai/chat": "REAL 0G Compute. {prompt, system?} -> {reply}",
+                                "POST /v1/chat/completions": "REAL 0G Compute, OpenAI shape, "
+                                                             "stream supported (baseURL "
+                                                             "http://127.0.0.1:4010/v1, any apiKey)",
+                                "GET /v1/models": "models you can pass as model"}})
+            return
+        if path in ("/v1/models", "/models"):
+            _, default, allowed = ai_setup()
+            self.send(200, {"object": "list", "default": default,
+                            "data": [{"id": m, "object": "model", "owned_by": "0g"} for m in allowed]},
+                      mock=False)
+            return
+        r = ROUTES.get(path)
+        if not r:
+            self.send(404, {"mock": True, "error": "no such endpoint", "see": "/"})
+            return
+        body = {"mock": True, "notice": NOTICE}
+        body.update(r[0](parse_qs(u.query)))
+        self.send(200, body)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="hack-box mock API (fake market and marketplace data)")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=4010)
+    a = ap.parse_args()
+    ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

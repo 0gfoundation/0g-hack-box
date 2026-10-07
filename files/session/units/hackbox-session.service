@@ -1,0 +1,13 @@
+# hack-box: the session clock (SPEC 3.4). Started by the attendee's Start
+# button (polkit allows start only) or `hackbox start`, stopped only by the
+# reset. Installed by setup/70-session.sh. No [Install]: an idle box runs no
+# timer.
+[Unit]
+Description=hack-box session timer
+After=hackbox-home.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/hackbox-session
+Restart=on-failure
+RestartSec=2

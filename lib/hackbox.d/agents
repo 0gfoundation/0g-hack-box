@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# hackbox-help: set <agent>... | show  (which agents the welcome screen offers)
+# hackbox agents: choose which agents the welcome screen offers on this box.
+#   hackbox agents set <agent>...   any of claude, claude-0g, opencode (or "default");
+#                                   claude and claude-0g are mutually exclusive
+#   hackbox agents show             current set, auth route, readiness per agent
+# Rewrites /etc/claude-code/managed-settings.json, /etc/opencode/opencode.json and
+# /etc/hackbox/agents.json. No reinstall; the attendee sees it at the next reset.
+# Run as the admin user (uses sudo). HB_ROOT=/tmp/x renders into a temp root, no sudo.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")/../.." && pwd)"
+if [ -n "${HB_ROOT:-}" ]; then
+  render=("$HERE/files/ai/hackbox-ai-render")
+elif [ -x /usr/local/sbin/hackbox-ai-render ]; then
+  render=(sudo /usr/local/sbin/hackbox-ai-render)
+else
+  echo "hackbox agents: not installed yet, run setup/65-ai.sh" >&2
+  exit 1
+fi
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: hackbox agents set <agent>...    agents: claude, claude-0g, opencode, default
+       hackbox agents show
+examples:
+  hackbox agents set claude opencode     Claude Code on Anthropic + OpenCode on 0G (default)
+  hackbox agents set claude-0g opencode  both on 0G Compute
+  hackbox agents set opencode            OpenCode only
+USAGE
+  exit 2
+}
+
+case "${1:-}" in
+  set)
+    shift
+    [ $# -gt 0 ] || usage
+    "${render[@]}" set "$@"
+    ;;
+  show) "${render[@]}" show ;;
+  *) usage ;;
+esac

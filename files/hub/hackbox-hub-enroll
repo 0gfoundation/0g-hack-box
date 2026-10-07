@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""hack-box: take the next free box name from the session hub (one stick, many boxes).
+
+Run as root by the headless first boot, right after 05-tailscale.sh, when
+/etc/hackbox/hub.conf has HUB_URL and HUB_ENROLL_TOKEN (a fleet stick) instead of a
+box token. The hub answers with a name (the same one again for a MAC it has seen, else
+the lowest free hackboxN) and this box's own token. Then:
+  - hub.conf gets HUB_TOKEN; the fleet enroll token is removed from the box
+  - hostnamectl, /etc/hosts and the Tailscale name change to the new name
+Prints the new name. Exit 0 also when there is nothing to do (no enroll token).
+Design: docs/superpowers/specs/2026-10-01-session-hub-design.md, Round 3.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+CONF = os.environ.get("HB_HUB_CONF", "/etc/hackbox/hub.conf")
+
+
+def read_conf():
+    conf = {}
+    with open(CONF, encoding="utf-8") as f:
+        for line in f:
+            m = re.match(r"^\s*(HUB_URL|HUB_TOKEN|HUB_ENROLL_TOKEN)=(['\"]?)(.*)\2\s*$", line)
+            if m:
+                conf[m.group(1)] = m.group(3)
+    return conf
+
+
+def first_mac():
+    """The first wired card, else any card (same rule as usb/headless/hostname.sh)."""
+    nics = sorted(os.listdir("/sys/class/net"))
+    wired = [n for n in nics if os.path.exists("/sys/class/net/%s/device" % n)
+             and not os.path.exists("/sys/class/net/%s/wireless" % n)]
+    anyc = [n for n in nics if os.path.exists("/sys/class/net/%s/device" % n)]
+    for n in wired + anyc:
+        mac = open("/sys/class/net/%s/address" % n).read().strip().lower()
+        if re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac) and mac != "00:00:00:00:00:00":
+            return mac
+    raise SystemExit("no network card with a MAC address")
+
+
+def enroll(conf, mac):
+    body = json.dumps({"mac": mac, "current_hostname": os.uname().nodename}).encode()
+    req = urllib.request.Request(conf["HUB_URL"].rstrip("/") + "/api/v1/enroll", data=body,
+                                 method="POST", headers={
+                                     "Authorization": "Bearer " + conf["HUB_ENROLL_TOKEN"],
+                                     "Content-Type": "application/json"})
+    last = None
+    for attempt in range(10):          # the tailnet path can take a moment after joining
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.load(r)
+        except OSError as e:
+            last = e
+            time.sleep(min(30, 3 * (attempt + 1)))
+    raise SystemExit("enroll failed: %s" % last)
+
+
+def main():
+    if not os.path.exists(CONF):
+        return 0
+    conf = read_conf()
+    if not conf.get("HUB_URL") or not conf.get("HUB_ENROLL_TOKEN"):
+        return 0
+    r = enroll(conf, first_mac())
+    name, token = r.get("name", ""), r.get("token", "")
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", name) or \
+            not re.fullmatch(r"[A-Za-z0-9._-]{16,}", token):
+        raise SystemExit("hub sent an unusable name or token")
+    tmp = CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("HUB_URL='%s'\nHUB_TOKEN='%s'\n" % (conf["HUB_URL"], token))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONF)
+    old = os.uname().nodename
+    if name != old:
+        subprocess.run(["hostnamectl", "set-hostname", name], check=True)
+        hosts = open("/etc/hosts", encoding="utf-8").read()
+        hosts = re.sub(r"^127\.0\.1\.1\s.*$", "127.0.1.1\t" + name, hosts, flags=re.M)
+        if "127.0.1.1" not in hosts:
+            hosts += "127.0.1.1\t%s\n" % name
+        with open("/etc/hosts", "w", encoding="utf-8") as f:
+            f.write(hosts)
+        subprocess.run(["tailscale", "set", "--hostname=" + name], check=False)
+    print(name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

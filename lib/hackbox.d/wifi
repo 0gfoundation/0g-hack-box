@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# hackbox-help: set | status | forget  (the box's Wi-Fi, password never printed)
+# hackbox wifi: manage the one system-wide Wi-Fi profile (hackbox-wifi, see setup/03-wifi.sh).
+#   hackbox wifi set [--ssid S] [--username U] [--hidden] [--country CC] [--key-mgmt auto|wpa-psk|sae]
+#                    [--eap-domain D] [--no-ca-check]
+#       Interactive: prompts for what is missing (password without echo). Scripted: the same
+#       values from the environment (WIFI_SSID, WIFI_USERNAME, WIFI_PASSWORD, WIFI_HIDDEN=1,
+#       WIFI_COUNTRY, WIFI_KEY_MGMT, WIFI_EAP_DOMAIN, WIFI_EAP_NO_CA_CHECK=1), and a password
+#       not in the environment is read from stdin (first line) when stdin is not a terminal.
+#       No username: WPA2/WPA3 personal. Username: WPA2-Enterprise (PEAP + MSCHAPv2).
+#       Writes /etc/hackbox/wifi.conf (root 0600) and runs setup/03-wifi.sh.
+#   hackbox wifi status   SSID, type, state, signal, IP address. Never the password.
+#   hackbox wifi forget   deletes the profile and /etc/hackbox/wifi.conf.
+# Run as the admin user (uses sudo).
+set -euo pipefail
+
+NAME=hackbox-wifi
+CONF=/etc/hackbox/wifi.conf
+here=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
+SETUP="$here/setup/03-wifi.sh"
+[ -f "$SETUP" ] || SETUP=/opt/hack-box/setup/03-wifi.sh
+
+usage() {
+  sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+# Single-quote a value for the shell-syntax conf (read back with shlex, never executed).
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  set)
+    ssid=${WIFI_SSID:-} username=${WIFI_USERNAME:-} hidden=${WIFI_HIDDEN:-0}
+    country=${WIFI_COUNTRY:-} key_mgmt=${WIFI_KEY_MGMT:-auto}
+    eap_domain=${WIFI_EAP_DOMAIN:-} no_ca=${WIFI_EAP_NO_CA_CHECK:-0}
+    user_given=0; [ -n "${WIFI_USERNAME+x}" ] && user_given=1
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --ssid) ssid=${2?}; shift 2 ;;
+        --username) username=${2?}; user_given=1; shift 2 ;;
+        --hidden) hidden=1; shift ;;
+        --country) country=${2?}; shift 2 ;;
+        --key-mgmt) key_mgmt=${2?}; shift 2 ;;
+        --eap-domain) eap_domain=${2?}; shift 2 ;;
+        --no-ca-check) no_ca=1; shift ;;
+        *) usage ;;
+      esac
+    done
+    if [ -z "$ssid" ]; then
+      [ -t 0 ] || { echo "hackbox wifi: no SSID (set WIFI_SSID or --ssid)" >&2; exit 2; }
+      IFS= read -r -p "Wi-Fi network name (SSID): " ssid
+    fi
+    if [ $user_given = 0 ] && [ -t 0 ]; then
+      IFS= read -r -p "Username (leave empty for a normal password network): " username
+    fi
+    if [ -n "${WIFI_PASSWORD+x}" ]; then
+      password=$WIFI_PASSWORD
+    elif [ -t 0 ]; then
+      IFS= read -r -s -p "Password (input hidden): " password; echo >&2
+    else
+      IFS= read -r password || true
+    fi
+    [ -n "$ssid" ] && [ -n "$password" ] || { echo "hackbox wifi: SSID and password are required" >&2; exit 1; }
+    # The password goes through a pipe into a root-only file, never argv. The previous conf
+    # is kept until setup/03-wifi.sh accepts the new values.
+    sudo sh -c '[ -f "$1" ] && cp -p "$1" "$1.prev" || true' sh "$CONF"
+    {
+      echo "# hack-box Wi-Fi, written by hackbox wifi set. root only (0600). See setup/03-wifi.sh."
+      echo "WIFI_SSID=$(q "$ssid")"
+      echo "WIFI_PASSWORD=$(q "$password")"
+      [ -n "$username" ] && echo "WIFI_USERNAME=$(q "$username")"
+      [ "$hidden" = 1 ] && echo "WIFI_HIDDEN=1"
+      [ -n "$country" ] && echo "WIFI_COUNTRY=$(q "$country")"
+      [ "$key_mgmt" != auto ] && echo "WIFI_KEY_MGMT=$(q "$key_mgmt")"
+      [ -n "$eap_domain" ] && echo "WIFI_EAP_DOMAIN=$(q "$eap_domain")"
+      [ "$no_ca" = 1 ] && echo "WIFI_EAP_NO_CA_CHECK=1"
+      true
+    } | sudo sh -c 'set -e; umask 077; mkdir -p /etc/hackbox; t=$(mktemp /etc/hackbox/.wifi.XXXXXX); cat > "$t"; chown root:root "$t"; chmod 0600 "$t"; mv -f "$t" "$1"' sh "$CONF"
+    unset password
+    if bash "$SETUP"; then
+      sudo rm -f "$CONF.prev"
+    else
+      sudo sh -c 'if [ -f "$1.prev" ]; then mv -f "$1.prev" "$1"; else rm -f "$1"; fi' sh "$CONF"
+      echo "hackbox wifi: not applied, the previous settings are unchanged" >&2
+      exit 1
+    fi
+    ;;
+  status)
+    if ! nmcli -t -f NAME connection show 2>/dev/null | grep -qx "$NAME"; then
+      echo "no Wi-Fi profile ($NAME). Set one with: hackbox wifi set"
+      exit 1
+    fi
+    ssid=$(nmcli -g 802-11-wireless.ssid connection show "$NAME" 2>/dev/null || true)
+    km=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$NAME" 2>/dev/null || true)
+    hidden=$(nmcli -g 802-11-wireless.hidden connection show "$NAME" 2>/dev/null || true)
+    case "$km" in
+      wpa-eap) kind="WPA2-Enterprise (PEAP/MSCHAPv2, user $(nmcli -g 802-1x.identity connection show "$NAME" 2>/dev/null))" ;;
+      sae) kind="WPA3 personal (sae)" ;;
+      wpa-psk) kind="WPA2/WPA3 personal (wpa-psk)" ;;
+      *) kind=${km:-unknown} ;;
+    esac
+    state=$(nmcli -g GENERAL.STATE connection show "$NAME" 2>/dev/null || true)
+    dev=$(nmcli -g GENERAL.DEVICES connection show "$NAME" 2>/dev/null || true)
+    [ -n "$dev" ] || dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2=="wifi"{print $1; exit}')
+    printf '%-10s %s\n' profile "$NAME" ssid "$ssid" type "$kind" hidden "${hidden:-no}"
+    printf '%-10s %s\n' device "${dev:-none (no Wi-Fi hardware found)}" state "${state:-not active}"
+    if [ -n "$dev" ]; then
+      sig=$(nmcli -t -f IN-USE,SIGNAL,SSID device wifi list ifname "$dev" --rescan no 2>/dev/null | awk -F: '$1=="*"{print $2"%"; exit}')
+      ip4=$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null | awk '{print $4}' | paste -sd' ')
+      printf '%-10s %s\n' signal "${sig:-n/a}" ip "${ip4:-none}"
+    fi
+    def=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+    printf '%-10s %s\n' default "${def:-no default route}"
+    ;;
+  forget)
+    if nmcli -t -f NAME connection show 2>/dev/null | grep -qx "$NAME"; then
+      sudo nmcli connection delete "$NAME" >/dev/null
+    fi
+    sudo rm -f "$CONF" /etc/hackbox/wifi.applied "/etc/NetworkManager/system-connections/$NAME.nmconnection"
+    echo "Wi-Fi profile $NAME and $CONF removed"
+    ;;
+  *) usage ;;
+esac
