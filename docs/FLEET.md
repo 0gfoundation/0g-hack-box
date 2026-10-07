@@ -147,6 +147,15 @@ Follow one from the Mac (it waits until the box is on the tailnet):
   end of provisioning). If a live box was released anyway, give it a token again:
   `ssh hackboxN hackbox hub set <hub url> <HUB_TOKEN_hackboxN from .env>`.
 
+- Testnet 0G and rewards: attendees' agents run `0g-fund <address>` (0.5 0G per wallet and
+  per session, through the hub faucet). `hub/deploy/faucet-env.sh wallets` lists funded
+  wallets; the dashboard shows fundings, rewards and token usage, with CSV exports at
+  `/dash/fundings.csv` and `/dash/rewards.csv`.
+- Builder helpers on every box: the local API on 127.0.0.1:4010 (mock market and marketplace
+  data plus a live 0G Compute AI relay), five OpenCode subagents, and the welcome-screen idea
+  starters. Edit the starters' briefs in `/etc/hackbox/ai/starters.json` (source
+  `files/ai/starters.json`); see `files/ai/README.md`.
+
 ## Update a running box (no reinstall)
 
     rsync -az --exclude=.git --exclude='.env' --exclude='.env.*' --exclude=usb/headless.conf --exclude=usb/out \
@@ -154,6 +163,12 @@ Follow one from the Mac (it waits until the box is on the tailnet):
     ssh hackbox1 'bash /opt/hack-box/setup/70-session.sh && hackbox reset'
 
 (`hackbox reset` only on an idle box; run the matching `setup/NN-*.sh` for other areas.)
+
+During the event, never touch a running session: install files on a busy box (they take
+effect at its next reset, when the screen app and the home are recreated) and restart
+services or the screen app only while `/run/hackbox/state` is `idle`. Rendered settings
+(`hackbox-ai-render current`) and the fresh home's AGENTS.md (`HB_HOME=/home/hacker
+/etc/hackbox/reset.d/50-ai-seed`) also only when idle.
 
 ## What protects what
 

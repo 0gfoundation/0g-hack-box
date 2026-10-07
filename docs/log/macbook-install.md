@@ -136,3 +136,46 @@ no `.env` or `headless.conf`. The whole procedure is now `docs/FLEET.md`.
 - All four: welcome screen with the Dev Day design (official logo, Singapore skyline with a
   Merlion traced from a photo), name, email and Telegram; agent keys from the dashboard;
   self-test 66 to 68 passed, 0 failed; all online and idle on the hub.
+
+## Event day (Dev Day, 2026-10-05)
+
+The rule all day: no change may touch a running session. A box was changed only while idle,
+or a file was installed while a session ran and took effect at the next reset (a background
+watcher waited for idle, applied, self-tested and rolled the screen app back if it did not
+stay up).
+
+- Black screens after a restart on hackbox3 and hackbox4 (amdgpu hot-plug deadlock on kernel
+  7.0.0-38): the HDMI connector was forced on through sysfs and the mode set with xrandr; on
+  hackbox4 mid-demo, with the session extended and `cinnamon --replace`. The permanent boot
+  fix (`video=HDMI-A-1:e`) waits until after the event.
+- "Preparing" pages that never cleared: an empty session (nothing saved) waited for Done.
+  The hub agent now tells the hub at the time-up screen (`POST .../end`, `empty: true`), and
+  uploads the archive early for a normal session.
+- OpenCode in auto mode (shell commands allowed, sudo/su/pkexec denied, loops still ask),
+  0GM (`0gm-1.0-35b-a3b`) as the default model, terminal 70 % and Firefox 30 % on the Hacker
+  Zone page at Start.
+- Testnet 0G: `0g-fund <address>` through the hub faucet (0.5 0G per wallet and per session,
+  one transfer per box per hour, 50 0G event budget). Funded wallets are on the dashboard and
+  in `/dash/fundings.csv`; rewards ($10 of 0G Compute credit, 0G Pay) in `/dash/rewards.csv`.
+- Token usage: each box reads a copy of the attendee's OpenCode database and reports totals
+  in its heartbeat; the dashboard shows per box, per session and event totals.
+- Builders: a local API on every box (`hackbox-mock-api.service`, 127.0.0.1:4010) with mock
+  prices, candles, order books, markets, an AI model and agent marketplace, listings, news
+  and portfolios (all marked mock), plus a real 0G Compute relay (`POST /ai/chat`,
+  `POST /v1/chat/completions`) so an app's browser code gets live AI without the key. The
+  relay never asks for fewer than 1024 tokens: 0GM reasons first and a 200 token cap
+  returned an empty reply.
+- OpenCode subagents `contract`, `frontend`, `designer`, `reviewer`, `pitch` on 0GM; the
+  seeded AGENTS.md asks for 3 to 5 in parallel in the first step, a live AI feature in every
+  app, and to fund and deploy contracts itself.
+- Welcome screen: "Build on 0G & Earn 0G", a sloped $10 credit ticket (slides in again every
+  7 s), a rectangular Hacker Zone passport stamp, idea chips (AI market, Trading, AI agent,
+  NFT drop, My own idea) whose brief becomes OpenCode's first prompt (`--prompt`, checked to
+  submit by itself), and a hint when Start is grey (an attendee had typed an email without
+  `@`).
+- Totals at 17:36, when the boxes went offline: 73 sessions (hackbox1 23, hackbox2 19,
+  hackbox3 19, hackbox4 12), 18 wallets funded with 9 0G, 4 rewards ($40), about 3.3M input,
+  1.3M output and 0.1M reasoning tokens plus 79.8M cached read over 2,321 replies.
+
+Open after the event: the permanent display boot fix, Cloudflare Access for the dashboard,
+rotating the faucet key, and the GitHub org token for session repos.
